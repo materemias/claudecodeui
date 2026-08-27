@@ -39,6 +39,52 @@ interface ScrollRestoreState {
   anchorOffset: number | null;
 }
 
+type UserTurnDirection = 'previous' | 'next';
+
+const USER_TURN_ALIGNMENT_TOLERANCE = 8;
+
+function findAdjacentUserTurn(
+  container: HTMLDivElement,
+  direction: UserTurnDirection,
+): HTMLElement | null {
+  const containerBounds = container.getBoundingClientRect();
+  const containerCenter = containerBounds.top + containerBounds.height / 2;
+  const userTurns = container.querySelectorAll<HTMLElement>('.chat-message.user');
+
+  if (direction === 'next') {
+    for (const userTurn of userTurns) {
+      const bounds = userTurn.getBoundingClientRect();
+      const center = bounds.top + bounds.height / 2;
+      if (center > containerCenter + USER_TURN_ALIGNMENT_TOLERANCE) {
+        return userTurn;
+      }
+    }
+    return null;
+  }
+
+  for (let index = userTurns.length - 1; index >= 0; index -= 1) {
+    const userTurn = userTurns[index];
+    const bounds = userTurn.getBoundingClientRect();
+    const center = bounds.top + bounds.height / 2;
+    if (center < containerCenter - USER_TURN_ALIGNMENT_TOLERANCE) {
+      return userTurn;
+    }
+  }
+  return null;
+}
+
+function waitForChatLayout(): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, 100);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  });
+}
+
 function captureScrollRestoreState(container: HTMLDivElement): ScrollRestoreState {
   const containerBounds = container.getBoundingClientRect();
   const anchor = Array.from(container.querySelectorAll<HTMLElement>('.chat-message'))
@@ -53,6 +99,19 @@ function captureScrollRestoreState(container: HTMLDivElement): ScrollRestoreStat
       ? anchor.getBoundingClientRect().top - containerBounds.top
       : null,
   };
+}
+
+function restoreScrollPosition(
+  container: HTMLDivElement,
+  { height, top, anchor, anchorOffset }: ScrollRestoreState,
+): void {
+  if (anchor?.isConnected && anchorOffset !== null) {
+    const nextAnchorOffset = anchor.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTop += nextAnchorOffset - anchorOffset;
+    return;
+  }
+
+  container.scrollTop = top + Math.max(container.scrollHeight - height, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -142,6 +201,7 @@ export function useChatSessionState({
   const [loadAllJustFinished, setLoadAllJustFinished] = useState(false);
   const [showLoadAllOverlay, setShowLoadAllOverlay] = useState(false);
   const [viewHiddenCount, setViewHiddenCount] = useState(0);
+  const [isNavigatingUserTurn, setIsNavigatingUserTurn] = useState(false);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const wasNearTopRef = useRef(false);
@@ -157,6 +217,9 @@ export function useChatSessionState({
   const scrollPositionRef = useRef({ height: 0, top: 0 });
   const loadAllFinishedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadAllOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isNavigatingUserTurnRef = useRef(false);
+  const visibleMessageCountRef = useRef(visibleMessageCount);
+  const chatMessagesLengthRef = useRef(0);
   const lastLoadedSessionKeyRef = useRef<string | null>(null);
   /**
    * Tracks the last processed value from `useProjectsState.newSessionTrigger`.
@@ -231,6 +294,18 @@ export function useChatSessionState({
   /* ---------------------------------------------------------------- */
 
   const activeSessionId = selectedSession?.id || currentSessionId || null;
+
+  const navigationSessionRef = useRef(activeSessionId);
+  const navigationGenerationRef = useRef(0);
+  if (navigationSessionRef.current !== activeSessionId) {
+    navigationSessionRef.current = activeSessionId;
+    navigationGenerationRef.current += 1;
+  }
+
+  useEffect(() => {
+    isNavigatingUserTurnRef.current = false;
+    setIsNavigatingUserTurn(false);
+  }, [activeSessionId]);
 
   // The activity indicator always reflects the latest status of the session
   // being viewed — never stale local UI state from the last time it was
@@ -343,6 +418,9 @@ export function useChatSessionState({
     return all;
   }, [storeMessages, viewHiddenCount, pendingUserMessage]);
 
+  visibleMessageCountRef.current = visibleMessageCount;
+  chatMessagesLengthRef.current = chatMessages.length;
+
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */
   /* ---------------------------------------------------------------- */
@@ -447,6 +525,59 @@ export function useChatSessionState({
     [hasMoreMessages, isActive, isLoadingMoreMessages, selectedProject, selectedSession, sessionStore],
   );
 
+  const navigateUserTurn = useCallback(async (direction: UserTurnDirection) => {
+    const container = scrollContainerRef.current;
+    const requestSessionId = activeSessionIdRef.current;
+    const requestGeneration = navigationGenerationRef.current;
+    if (!container || isNavigatingUserTurnRef.current) return;
+
+    const isCurrentNavigation = () => (
+      isActiveRef.current
+      && activeSessionIdRef.current === requestSessionId
+      && navigationGenerationRef.current === requestGeneration
+    );
+
+    isNavigatingUserTurnRef.current = true;
+    setIsNavigatingUserTurn(true);
+    setIsUserScrolledUp(true);
+
+    try {
+      let target = findAdjacentUserTurn(container, direction);
+
+      while (!target && direction === 'previous' && isCurrentNavigation()) {
+        if (visibleMessageCountRef.current < chatMessagesLengthRef.current) {
+          pendingScrollRestoreRef.current = captureScrollRestoreState(container);
+          setVisibleMessageCount((current) => (
+            Math.min(current + INITIAL_VISIBLE_MESSAGES, chatMessagesLengthRef.current)
+          ));
+          await waitForChatLayout();
+          if (!isCurrentNavigation()) break;
+        } else if (isLoadingMoreRef.current) {
+          await waitForChatLayout();
+          if (!isCurrentNavigation()) break;
+        } else {
+          const loaded = await loadOlderMessages(container);
+          if (!loaded) break;
+          await waitForChatLayout();
+          if (!isCurrentNavigation()) break;
+        }
+
+        target = findAdjacentUserTurn(container, direction);
+      }
+
+      if (!target || !container.isConnected || !isCurrentNavigation()) return;
+
+      pendingScrollRestoreRef.current = null;
+      target.scrollIntoView({ behavior: 'auto', block: 'center' });
+    } finally {
+      if (navigationGenerationRef.current === requestGeneration) {
+        isNavigatingUserTurnRef.current = false;
+        setIsNavigatingUserTurn(false);
+        setIsUserScrolledUp(!isNearBottom());
+      }
+    }
+  }, [isNearBottom, loadOlderMessages]);
+
   const handleScroll = useCallback(async () => {
     if (!isActive) return;
     const container = scrollContainerRef.current;
@@ -496,16 +627,7 @@ export function useChatSessionState({
 
     const container = scrollContainerRef.current;
     if (pendingScrollRestoreRef.current) {
-      const { height, top, anchor, anchorOffset } = pendingScrollRestoreRef.current;
-      if (anchor?.isConnected && anchorOffset !== null) {
-        const nextAnchorOffset = (
-          anchor.getBoundingClientRect().top
-          - container.getBoundingClientRect().top
-        );
-        container.scrollTop += nextAnchorOffset - anchorOffset;
-      } else {
-        container.scrollTop = top + Math.max(container.scrollHeight - height, 0);
-      }
+      restoreScrollPosition(container, pendingScrollRestoreRef.current);
       pendingScrollRestoreRef.current = null;
       return;
     }
@@ -515,7 +637,7 @@ export function useChatSessionState({
         ? scrollPositionRef.current.top
         : container.scrollHeight;
     }
-  }, [chatMessages.length, isActive, isUserScrolledUp]);
+  }, [chatMessages.length, isActive, isUserScrolledUp, visibleMessageCount]);
 
   // Reset scroll/pagination state on session change
   useEffect(() => {
@@ -990,5 +1112,7 @@ export function useChatSessionState({
     isNearBottom,
     handleScroll,
     requestLatestMessages,
+    navigateUserTurn,
+    isNavigatingUserTurn,
   };
 }

@@ -117,7 +117,9 @@
     "clickToChangeMode": "Нажмите для смены режима разрешений (или нажмите Tab в поле ввода)",
     "showAllCommands": "Показать все команды",
     "clearInput": "Очистить ввод",
-    "scrollToBottom": "Прокрутить вниз"
+    "scrollToBottom": "Прокрутить вниз",
+    "previousUserTurn": "Предыдущая реплика пользователя",
+    "nextUserTurn": "Следующая реплика пользователя"
   },
   "providerSelection": {
     "title": "Выберите вашего AI-ассистента",

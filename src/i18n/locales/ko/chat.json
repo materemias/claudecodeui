@@ -129,6 +129,8 @@
     "showAllCommands": "모든 명령어 보기",
     "clearInput": "입력 지우기",
     "scrollToBottom": "맨 아래로 스크롤",
+    "previousUserTurn": "이전 사용자 턴",
+    "nextUserTurn": "다음 사용자 턴",
     "queue": {
       "sendNext": "다음 메시지 대기열에 추가",
       "update": "대기 중인 메시지 업데이트",
