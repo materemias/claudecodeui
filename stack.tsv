@@ -1,0 +1,43 @@
+# The fork's branch ledger. Untracked, local only. Read by ./stack.
+#
+# Columns are TAB-separated: branch, base, intent, note.
+#   branch  category prefix decides the intent category: feat/ fix/ ui/ local/
+#   base    what it was cut from; a branch named here is a parent, not a leaf
+#   intent  pr    = meant for an upstream PR (open one with ./stack pr <branch>)
+#           local = fork-only, never PR'd; pushed to origin as a backup only
+#   note    one line, for ./stack ls
+#
+# File order is merge order for ./stack daily. It is load-bearing: feat/omp-rich-history
+# must precede ui/interrupted-turn-notice (both add a MessageKind member and a
+# MessageComponent branch), and the recorded rerere resolutions assume this order.
+#
+# PR numbers are deliberately absent - ./stack ls reads them live from GitHub, so they
+# cannot go stale. Add a row with ./stack new, drop one by hand when its PR lands.
+#
+#branch	base	intent	note
+feat/shared-tool-approval-registry	upstream/main	pr	provider-agnostic tool-approval registry
+feat/omp-provider	feat/shared-tool-approval-registry	pr	Oh My Pi as a first-class provider
+feat/omp-rich-history	feat/omp-provider	pr	rich omp transcript UX + /cost backend id
+fix/chat-stream-buffers	feat/omp-provider	pr	per-session buffers for both streamed surfaces
+fix/chat-stream-sealing	fix/chat-stream-buffers	pr	close a streamed row at each message boundary
+ui/interrupted-turn-notice	fix/chat-stream-buffers	pr	say when a turn was cut off, in 11 locales
+fix/ws-resume-and-reconnect	upstream/main	pr	replace a dead-but-OPEN socket; recover mid-turn
+fix/chat-latex-escaping	upstream/main	pr	escaping no longer shreds LaTeX or currency
+fix/chat-row-containment	upstream/main	pr	scrolled-away rows stop becoming tall empty boxes
+local/tool-content-folding	upstream/main	local	fold large tool content - taste, never a PR
+feat/back-opens-session-list	upstream/main	pr	mobile back opens the session list
+feat/agent-model-catalog	upstream/main	pr	agent route read a wrapper that never existed
+feat/running-sessions-linux	feat/omp-provider	pr	detect agent sessions running outside the UI
+local/mobile-sidebar	upstream/main	local	compact mobile sidebar controls
+fix/running-view-collapse	upstream/main	pr	Running now can collapse its project groups
+fix/pwa-cold-start-session	upstream/main	pr	keep the session when auth cannot be verified (PWA cold start)
+fix/jwt-secret-rotation	upstream/main	pr	stop silently rotating the JWT secret when an app_config read fails
+fix/chat-stale-scroll-and-page-writes	upstream/main	pr	a reading gesture wins; a page in flight cannot write into the next session
+fix/stale-refreshed-token	upstream/main	pr	TODO: one-line note
+local/running-default-tab	upstream/main	local	sidebar opens on Running, without its redundant header bar
+local/selected-session-contrast	upstream/main	local	the selected session is identifiable in dark mode
+fix/omp-live-model-sync	feat/omp-rich-history	pr	follow omp live model: parse config_option_update, sticky dirty-gated pushes
+ui/model-picker-search	upstream/main	pr	search box + provider group headings in the composer model picker
+local/more-chat-history	upstream/main	local	load 80 older chat rows per top-scroll fetch instead of 20
+feat/chat-turn-navigation	upstream/main	pr	add mobile controls to jump between user turns
+local/ui/hide-print-sessions	upstream/main	local	hide one-shot CLI sessions from the sidebar

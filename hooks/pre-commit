@@ -1,0 +1,73 @@
+#!/bin/sh
+# my/daily is a rebuild target, not a branch: `./stack daily` recreates it with
+# `git switch -C my/daily upstream/main`, so a commit made here is discarded on the next
+# rebuild and can never reach a PR. Its companion is pre-merge-commit, which git invokes
+# instead of this hook when a merge resolves cleanly.
+#
+# There is deliberately no "a merge is in progress, so this must be the rebuild" exemption.
+# Merge state is not evidence of origin: a refused hand merge leaves MERGE_HEAD behind, and
+# aborting a conflicted rebuild and re-merging the same leaf by hand reproduces the same sha.
+# The rebuild's own commits pass because it exports STACK_DAILY; a conflict it hands you is
+# finished with `./stack daily --continue`, which sets that too.
+
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+
+# The main checkout is the integration tree. Every development branch must commit from its own
+# linked worktree, which `stack new` and `stack wt` create.
+gitdir=$(cd "$(git rev-parse --git-dir)" && pwd -P)
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+if [ "$branch" != "my/daily" ] && [ "$gitdir" = "$common" ]; then
+    cat >&2 <<EOF
+
+stack: refusing to commit $branch from the main checkout.
+
+Development branches commit from their own linked worktrees. Keep the main checkout on
+my/daily. Preserve these edits, switch the main checkout back, then run:
+
+    ./stack wt $branch
+
+See CLAUDE.md, "Start here", for moving uncommitted edits without losing them.
+
+EOF
+    exit 1
+fi
+
+[ "$branch" = "my/daily" ] || exit 0
+[ -n "$STACK_DAILY" ] && exit 0
+
+if [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+    cat >&2 <<'EOF'
+
+stack: refusing to commit a merge on my/daily by hand.
+
+If this is the conflict ./stack daily stopped on: resolve it, `git add -u` (never `-A`), then
+
+    ./stack daily --continue        # commits this merge and finishes the remaining leaves
+
+Anything else: `git merge --abort`, then `./stack daily`. my/daily is reconstructed from the
+ledger, never advanced by hand - that is what keeps merge order and the rerere resolutions
+meaningful.
+
+EOF
+    exit 1
+fi
+
+cat >&2 <<'EOF'
+
+stack: refusing a non-merge commit on my/daily.
+
+my/daily is the integration tree, rebuilt from upstream/main by `./stack daily`. It holds
+merge commits only. A commit made here is thrown away by the next rebuild and belongs to no
+branch, so it can never be pushed or reviewed.
+
+Move the work to its own branch instead - nothing is lost, the edits stay on disk:
+
+    git stash create                 # prints a sha; nothing in the tree changes
+    ./stack new fix/<name>           # worktree at ../claudecodeui.<name>, cut from upstream/main
+    cd ../claudecodeui.<name> && git checkout <sha> -- <the files you own>
+
+Never `git reset --hard` or `git checkout -- .` to get past this - that is the one action
+that does destroy the work. See CLAUDE.md, "Start here".
+
+EOF
+exit 1

@@ -1,0 +1,751 @@
+#!/usr/bin/env bash
+# stack - branch ledger and my/daily rebuilder for this fork. Untracked, local only.
+#
+#   stack ls                       every branch: category, live PR, commits, sync, daily, worktree
+#   stack sync                     mirror upstream/main to origin/main
+#   stack new <cat>/<name> [base]  branch + worktree from base (default upstream/main)
+#   stack wt <branch> [--teardown] check an existing branch out in its own worktree, or drop it
+#   stack pr <branch>              push and open the upstream PR
+#   stack dev <branch> [--fresh]   hot-reload dev pair for a branch worktree; pm2 untouched
+#   stack daily [--quick]          rebuild my/daily from the ledger, build, test, restart pm2
+#   stack daily --continue         finish the conflict a stopped rebuild left, then resume
+#   stack setup [--publish]        make this checkout self-describing to a fresh agent session
+#   stack audit                    replay every rebuild merge with rerere off and classify it
+#
+# Runs from any worktree and from PATH. The ledger is stack.tsv beside the real script; PR
+# numbers live on GitHub, never in the ledger.
+set -euo pipefail
+
+# The main checkout of *this* clone - where its ledger, hooks and restart stamp live. A
+# worktree's `--git-common-dir` is the main checkout's .git, so this resolves correctly from
+# every worktree, and while cwd is inside a checkout the script never leaves it, even when the
+# ledger is missing: borrowing another clone's ledger would point `stack daily` at that clone's
+# `my/daily` and restart pm2 on it. Outside any checkout there is no calling clone to stay in,
+# so it follows the symlink on PATH to whichever clone owns that entry - convenient for `stack
+# ls` from anywhere, but the target is then implied rather than chosen, so `need_ledger` says so
+# out loud before any command acts on it.
+if _common=$(git rev-parse --git-common-dir 2>/dev/null); then
+  ROOT=$(cd "$(dirname "$(cd "$_common" && pwd)")" && pwd); ROOT_SOURCE=cwd
+else
+  ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd); ROOT_SOURCE=path
+  cd "$ROOT"   # every command runs git in cwd; without this they all fail out here
+fi
+unset _common
+LEDGER="$ROOT/stack.tsv"
+REPO=siteboon/claudecodeui
+FORK=materemias
+UPSTREAM=upstream/main
+PM2_APP=claude-code-ui-fork
+CATEGORIES="feat fix ui local"
+
+die() { printf 'stack: %s\n' "$*" >&2; exit 1; }
+
+# Keep the fork's main branch an exact mirror of upstream. The explicit lease makes repeated
+# runs converge while refusing to overwrite a remote update that arrived after our fetch.
+sync_mains() {
+  local seen
+  git fetch --prune upstream >/dev/null
+  git fetch --prune origin >/dev/null
+  seen=$(git rev-parse refs/remotes/origin/main)
+  git push --force-with-lease="refs/heads/main:$seen" origin "$UPSTREAM:refs/heads/main" >/dev/null
+}
+
+# Dev ports. The pm2 instance owns 3111; the dev pair must never take it.
+DEV_SERVER_PORT=${DEV_SERVER_PORT:-3112}
+DEV_VITE_PORT=${DEV_VITE_PORT:-5173}
+
+# Which worktree each branch is checked out in: the whole map, and a single-branch lookup over
+# it. `git worktree list` is one process either way - `ls` reads the map once for every row,
+# `dev` and `wt` ask about one branch.
+wt_map() {
+  git worktree list --porcelain \
+    | awk '$1=="worktree"{w=$2} $1=="branch"{sub(/^refs\/heads\//,"",$2); print $2"\t"w}'
+}
+wt_lookup() { awk -F'\t' -v b="$2" '$1==b {print $2; exit}' <<<"$1"; }
+worktree_of() { wt_lookup "$(wt_map)" "$1"; }
+
+# That path, printed so it resolves from wherever it is pasted: `~/` is expanded by the shell,
+# while a `../claudecodeui.x` relative to the checkout would be wrong from /tmp - and from a
+# subdirectory of the checkout too. `-` when the branch has no worktree.
+wt_show() {
+  local w=$1
+  [ -n "$w" ] || { printf -- '-\n'; return; }
+  case $w in
+    "$HOME"/*) printf '~/%s\n' "${w#"$HOME"/}" ;;
+    *)         printf '%s\n' "$w" ;;
+  esac
+}
+
+# Content hash of the built server. dist/ is read per request, so a client rebuild is live
+# on the next page load; dist-server/ is loaded once at process start, so only a change here
+# needs pm2. Compared against the stamp written at the last restart, which also catches a
+# process still serving an older artifact.
+SERVED_STAMP="$ROOT/.git/stack-served-server.sha"
+server_hash() {
+  # `find` on a missing dist-server exits non-zero, and this script runs under `set -o
+  # pipefail`, so without the fallback a first build in a fresh checkout kills the run here
+  # with no message at all.
+  { find dist-server -type f -name '*.js' 2>/dev/null || true; } | sort \
+    | xargs -r sha1sum | sha1sum | cut -d' ' -f1
+}
+
+# Ledger rows, comments and blanks stripped. Order is preserved: it is merge order.
+rows() { sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$LEDGER"; }
+
+# `setup` is the one command that runs before the ledger exists. Every other command is gated at
+# dispatch rather than inside `rows`, which runs in subshells and pipelines where a `die` prints
+# once per caller and cannot stop the run.
+need_ledger() {
+  [ "$ROOT_SOURCE" = cwd ] || printf 'stack: cwd is outside any checkout - operating on %s\n' "$ROOT" >&2
+  [ -e "$LEDGER" ] || die "no ledger at $LEDGER - run 'stack setup' in this checkout first"
+}
+field() { rows | awk -F'\t' -v b="$1" -v n="$2" '$1==b {print $n}'; }
+
+# A leaf is a branch no other row is based on. Merging a parent as well as its child is
+# how you get a conflict with no side to pick, so the rebuild only ever merges leaves.
+leaves() {
+  local bases; bases=$(rows | cut -f2)
+  rows | cut -f1 | while read -r b; do
+    grep -qxF "$b" <<<"$bases" || printf '%s\n' "$b"
+  done
+}
+
+# headRefName -> "#<number> <STATE>". Read live, so a number can never be stale: this branch
+# has already had one PR closed and reopened under a new number (#1076 -> #1143), which a
+# stored id would still be reporting. The answer is cached in .git only so `ls` still works
+# offline; cached rows are printed with a trailing ~.
+PR_CACHE="$ROOT/.git/stack-pr-cache.tsv"
+pr_map() {
+  local live
+  live=$(gh pr list --repo "$REPO" --author "$FORK" --state all --limit 100 \
+           --json number,headRefName,state \
+           --jq '.[] | "\(.headRefName)\t#\(.number) \(.state)"' 2>/dev/null || true)
+  if [ -n "$live" ]; then
+    printf '%s\n' "$live" > "$PR_CACHE"
+    printf '%s\n' "$live"
+  elif [ -s "$PR_CACHE" ]; then
+    sed 's/$/~/' "$PR_CACHE"
+  fi
+}
+
+cmd_ls() {
+  local map wts; map=$(pr_map); wts=$(wt_map)
+  local daily_head; daily_head=$(git rev-parse -q --verify my/daily || true)
+  local fmt='%-36s %-6s %-14s %8s %-8s %-6s %-28s %s\n'
+
+  # shellcheck disable=SC2059  # one format, three call sites: a variable is the only way
+  printf "$fmt" BRANCH CAT PR COMMITS ORIGIN DAILY BASE WORKTREE
+  while IFS=$'\t' read -r branch base intent note; do
+    local cat=${branch%%/*} sha commits origin daily pr
+    sha=$(git rev-parse -q --verify "$branch" || true)
+    if [ -z "$sha" ]; then
+      printf "$fmt" "$branch" "$cat" MISSING - - - "$base" -
+      continue
+    fi
+    commits=$(git rev-list --count "$base..$branch" 2>/dev/null || echo '?')
+    if git rev-parse -q --verify "origin/$branch" >/dev/null; then
+      [ "$(git rev-parse "origin/$branch")" = "$sha" ] && origin=sync || origin=ahead
+    else
+      origin=unpushed
+    fi
+    if [ -n "$daily_head" ] && git merge-base --is-ancestor "$sha" "$daily_head"; then
+      daily=yes
+    else
+      daily=no
+    fi
+    # A head branch can carry several PRs - #1076 was closed and reopened as #1143 on this
+    # very branch - so show the live one and count the rest.
+    local prs; prs=$(awk -F'\t' -v b="$branch" '$1==b {print $2}' <<<"$map")
+    if [ -n "$prs" ]; then
+      pr=$( { grep -m1 -E 'OPEN|MERGED' <<<"$prs" || head -1 <<<"$prs"; } | head -1)
+      local n; n=$(grep -c . <<<"$prs")
+      [ "$n" -gt 1 ] && pr="$pr +$((n - 1))"
+    else
+      pr=$([ "$intent" = local ] && echo 'never' || echo '-')
+    fi
+    printf "$fmt" "$branch" "$cat" "$pr" "$commits" "$origin" "$daily" "$base" \
+      "$(wt_show "$(wt_lookup "$wts" "$branch")")"
+    # An intent the branch name contradicts, or a local branch that reached GitHub.
+    [ "$cat" = local ] && [ "$intent" != local ] && printf '  ^ intent %s but local/ prefix\n' "$intent"
+    [ "$intent" = local ] && [[ $pr == \#* ]] && printf '  ^ marked local but has a PR: %s\n' "$pr"
+    :
+  done < <(rows)
+
+  printf '\nleaves, in merge order: %s\n' "$(leaves | tr '\n' ' ')"
+}
+
+# Every agent session has to find the fork rules and this script without being told. Claude Code
+# reads `<checkout>/CLAUDE.md`; omp reads it through the local `claude-md` extension, which walks
+# ancestors for root CLAUDE.md files that omp's own `claude` provider would miss (that provider
+# reads only `<cwd>/.claude/CLAUDE.md`, with no walk-up). One file per checkout serves both - a
+# `.claude/CLAUDE.md` alias beside it would only make the extension skip the root file as already
+# discovered. `CLAUDE.md` is ignored by upstream's own .gitignore, and `/stack` plus
+# `/CLAUDE-history.md` are in the shared .git/info/exclude, so every link stays invisible to git.
+seed_checkout() {
+  local dir=$1
+  # The main checkout holds the real files and the real script; there is nothing to link.
+  if [ "$dir" != "$ROOT" ]; then
+    ln -sfn "$ROOT/CLAUDE.md" "$dir/CLAUDE.md"
+    # The doc points at its history companion as a sibling, so that sibling has to exist here too.
+    ln -sfn "$ROOT/CLAUDE-history.md" "$dir/CLAUDE-history.md"
+    ln -sfn "$ROOT/stack" "$dir/stack"      # so the `./stack` habit works in a worktree too
+  fi
+}
+
+TOOLING_BRANCH=local/tooling
+TOOLING_REF=refs/remotes/origin/local/tooling
+# What a blind clone needs: the workflow doc a session reads, its history companion, this script
+# and the ledger. The hooks travel too, under hooks/ on the branch.
+TOOLING_FILES="stack stack.tsv CLAUDE.md CLAUDE-history.md"
+
+# The tooling is untracked by design, so a clone starts blind. Restore it from the never-merged
+# local/tooling branch, writing with `git show` rather than `git checkout --` so nothing is
+# staged in the clone's index. Hooks live in the common .git, so one install guards every
+# worktree of that clone.
+restore_tooling() {
+  local dir=$1 common f
+  git -C "$dir" fetch -q origin "refs/heads/$TOOLING_BRANCH:$TOOLING_REF" \
+    || die "no origin/$TOOLING_BRANCH to restore from - publish it with 'stack setup --publish'"
+  for f in $TOOLING_FILES; do
+    git -C "$dir" show "$TOOLING_REF:$f" > "$dir/$f"
+  done
+  chmod +x "$dir/stack"
+  common=$(cd "$dir" && cd "$(git rev-parse --git-common-dir)" && pwd)
+  for f in pre-commit pre-merge-commit; do
+    git -C "$dir" show "$TOOLING_REF:hooks/$f" > "$common/hooks/$f"
+    chmod +x "$common/hooks/$f"
+  done
+}
+
+# Refresh local/tooling on the fork so a clone on another machine can bootstrap. Built in a
+# throwaway repo: an orphan branch in this checkout would have to touch the working tree, which
+# is never safe while a session is editing it.
+publish_tooling() {
+  local tmp common url f
+  common=$(cd "$ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd)
+  # This clone's own origin, so the push target matches where `stack setup` fetches from and the
+  # command is exercisable against any remote.
+  url=$(git -C "$ROOT" remote get-url origin)
+  tmp=$(mktemp -d)
+  for f in $TOOLING_FILES; do cp "$ROOT/$f" "$tmp/"; done
+  mkdir -p "$tmp/hooks"
+  cp "$common/hooks/pre-commit" "$common/hooks/pre-merge-commit" "$tmp/hooks/"
+  git -C "$tmp" init -q -b "$TOOLING_BRANCH"
+  git -C "$tmp" add -A
+  git -C "$tmp" commit -q -m 'chore(tooling): fork workflow doc, stack, ledger and guard hooks'
+  git -C "$tmp" push -f "$url" "$TOOLING_BRANCH"
+  rm -rf "$tmp"
+  printf 'stack: pushed %s to %s; a clone elsewhere bootstraps with `stack setup`\n' \
+    "$TOOLING_BRANCH" "$url"
+}
+
+cmd_setup() {
+  case "${1:-}" in
+    --publish) publish_tooling; return ;;
+    '') ;;
+    *) die 'usage: stack setup [--publish]' ;;
+  esac
+  local here; here=$(git rev-parse --show-toplevel 2>/dev/null) || die 'not inside a git checkout'
+
+  # A clone that has never been set up: restore the tooling into its own main checkout rather
+  # than pointing this tree at some other clone's copy.
+  if [ ! -e "$LEDGER" ]; then
+    restore_tooling "$ROOT"
+  fi
+
+  seed_checkout "$here"
+
+  # One PATH entry, first clone wins. Repointing it at whichever clone ran setup last would aim
+  # a bare `stack daily` at that clone's my/daily from anywhere on the machine.
+  local onpath="$HOME/.local/bin/stack" pathnote
+  mkdir -p "$HOME/.local/bin"
+  if [ ! -e "$onpath" ]; then
+    ln -s "$ROOT/stack" "$onpath"
+    pathnote=$onpath
+  elif [ "$(readlink -f "$onpath")" = "$(readlink -f "$ROOT/stack")" ]; then
+    pathnote=$onpath
+  else
+    pathnote="$onpath -> $(readlink "$onpath") (another clone owns it; use ./stack here)"
+  fi
+
+  local common h missing=
+  common=$(cd "$here" && cd "$(git rev-parse --git-common-dir)" && pwd)
+  # `.git/info/exclude` is never cloned, so in a fresh clone the tooling shows up as untracked.
+  # `CLAUDE.md` is covered by upstream's own .gitignore; these three are not.
+  mkdir -p "$common/info"
+  for h in /stack /stack.tsv /CLAUDE-history.md; do
+    grep -qxF "$h" "$common/info/exclude" 2>/dev/null || printf '%s\n' "$h" >> "$common/info/exclude"
+  done
+  for h in pre-commit pre-merge-commit; do
+    [ -x "$common/hooks/$h" ] || missing="$missing $h"
+  done
+
+  printf 'stack: %s\n' "$here"
+  printf '  CLAUDE.md         %s\n' "$(readlink "$here/CLAUDE.md" || echo 'real file')"
+  printf '  stack on PATH     %s\n' "$pathnote"
+  [ -z "$missing" ] || printf '  hooks MISSING:%s - my/daily is unguarded here\n' "$missing"
+  if [ -n "$(cd "$here" && git status --porcelain --ignored=no | grep -E 'CLAUDE\.md|stack$' || true)" ]; then
+    printf '  WARNING: a seeded path is visible to git in this checkout\n'
+  fi
+}
+
+# Everything a worktree needs beyond the checkout itself, for `new` and for `wt` alike. Safe to
+# re-run: it repairs one whose seeded links went missing rather than duplicating anything.
+outfit_worktree() {
+  local wt=$1 wtgit
+  [ -e "$wt/node_modules" ] || ln -s ../claudecodeui/node_modules "$wt/node_modules"
+  # .gitignore matches node_modules/ as a directory, not as a symlink, so without the exclude
+  # below `git add -A` in the worktree would commit the link.
+  wtgit="$ROOT/.git/worktrees/$(basename "$wt")"
+  mkdir -p "$wtgit/info"   # git does not create info/ until something needs it
+  grep -qxF node_modules "$wtgit/info/exclude" 2>/dev/null \
+    || printf 'node_modules\n' >> "$wtgit/info/exclude"
+  seed_checkout "$wt"   # a session started in here finds the rules and the script
+}
+
+cmd_new() {
+  local spec=${1:-} base=${2:-$UPSTREAM}
+  [ -n "$spec" ] || die 'usage: ./stack new <cat>/<name> [base]'
+  local cat=${spec%%/*} name=${spec#*/}
+
+  # The category is a decision, not a naming detail: feat/fix/ui are PR-bound, local/ never is.
+  # A bare name or an unknown prefix is a question for the user, so ask when there is a terminal
+  # to ask on and refuse otherwise - guessing it would silently decide whether the work ships.
+  if [ "$name" = "$spec" ] || ! grep -qw "$cat" <<<"$CATEGORIES"; then
+    [ "$name" = "$spec" ] || { name=$spec; }   # `wat/thing` is a name that needs a category
+    [ -t 0 ] || die "name the branch <cat>/<name>, one of: $CATEGORIES (feat=new capability, fix=bug fix, ui=UI/UX change, local=fork-only, never a PR)"
+    printf 'stack: which category is "%s"?\n' "$name" >&2
+    printf '  feat   a new capability        -> upstream PR\n  fix    a bug fix              -> upstream PR\n  ui     a UI/UX change         -> upstream PR\n  local  fork-only, never a PR\n' >&2
+    local answer
+    while :; do
+      printf 'stack: category [feat/fix/ui/local]: ' >&2
+      read -r answer </dev/tty || die 'no category given'
+      grep -qw "$answer" <<<"$CATEGORIES" && break
+      printf 'stack: not a category: %s\n' "$answer" >&2
+    done
+    cat=$answer
+    spec="$cat/$name"
+    printf 'stack: creating %s\n' "$spec" >&2
+  fi
+  [ -n "$name" ] || die 'name the branch <cat>/<name>'
+  # A base is upstream/main or a branch already in the ledger. Never my/daily: a branch cut
+  # from it embeds every other leaf's merge commits, which is how E once re-folded a stale
+  # snapshot of C into the rebuild and silently dropped C's newest commit.
+  if [ "$base" != "$UPSTREAM" ] && ! grep -qxF "$base" <<<"$(rows | cut -f1)"; then
+    die "base must be $UPSTREAM or a ledger branch, not $base"
+  fi
+  git rev-parse -q --verify "$base" >/dev/null || die "no such base: $base"
+  git rev-parse -q --verify "$spec" >/dev/null && die "$spec already exists"
+
+  local wt="${ROOT%/*}/claudecodeui.$name"   # the sibling path itself, not $ROOT/../ of it
+  [ -e "$wt" ] && die "$wt already exists"
+  sync_mains
+
+  git worktree add -b "$spec" "$wt" "$base"
+  outfit_worktree "$wt"
+
+  local intent; intent=$([ "$cat" = local ] && echo local || echo pr)
+  printf '%s\t%s\t%s\t%s\n' "$spec" "$base" "$intent" 'TODO: one-line note' >> "$LEDGER"
+  printf '\nledger row %s (%s), worktree at %s; CLAUDE.md, CLAUDE-history.md and stack seeded\n' \
+    "$spec" "$intent" "$wt"
+}
+
+# Check an existing ledger branch out in its own sibling worktree, or tear that worktree down
+# again. `new` does this for a branch it creates; for a branch that already exists there was
+# nothing, and `dev`'s hint pointed at `new` - which would have made a *second* branch and a
+# second ledger row instead of a checkout of the one asked for. Teardown keeps the branch, its
+# ledger row and its place in the merge order: a worktree is a checkout, never the work, so
+# there is no reason to leave one open after the task that needed it.
+cmd_wt() {
+  local branch= teardown=no a
+  for a in "$@"; do
+    case $a in
+      --teardown) teardown=yes ;;
+      -*)         die 'usage: ./stack wt <branch> [--teardown]' ;;
+      *)          [ -z "$branch" ] || die 'one branch at a time'; branch=$a ;;
+    esac
+  done
+  [ -n "$branch" ] || die 'usage: ./stack wt <branch> [--teardown]'
+  [ "$branch" = my/daily ] && die 'my/daily is the main checkout, never a worktree'
+  grep -qxF "$branch" <<<"$(rows | cut -f1)" || die "$branch is not in the ledger"
+  git rev-parse -q --verify "$branch" >/dev/null || die "$branch is in the ledger but has no commit"
+
+  local name=${branch#*/} wt existing
+  wt="${ROOT%/*}/claudecodeui.$name"
+  existing=$(worktree_of "$branch")
+
+  if [ "$teardown" = yes ]; then
+    [ -n "$existing" ] || { printf 'stack: %s has no worktree\n' "$branch"; return; }
+    [ "$existing" = "$ROOT" ] && die "$branch is checked out in the main checkout, not a worktree"
+    # Nothing here passes --force, so `git worktree remove` refuses on any modification or
+    # untracked file and cleanup cannot lose work. Check first anyway, to name the branch and the
+    # paths instead of leaving git's `use --force to delete it` as the only advice - and to print
+    # a snapshot sha, which `stash create` gives for tracked changes only, never for untracked.
+    local dirty; dirty=$(git -C "$existing" status --porcelain --ignored=no)
+    if [ -n "$dirty" ]; then
+      printf '%s\n' "$dirty" >&2
+      local snap; snap=$(git -C "$existing" stash create) || true
+      [ -z "$snap" ] || printf 'stack: tracked changes snapshotted: git stash apply %s\n' "$snap" >&2
+      die "$branch has the content above in $(wt_show "$existing") - commit, stash or delete it first"
+    fi
+    git worktree remove "$existing"
+    git worktree prune
+    printf 'stack: removed %s. %s stays at %s\n' \
+      "$(wt_show "$existing")" "$branch" "$(git rev-parse --short "$branch")"
+    return
+  fi
+
+  if [ -n "$existing" ]; then
+    outfit_worktree "$existing"
+    printf 'stack: %s is already checked out at %s\n' "$branch" "$(wt_show "$existing")"
+    return
+  fi
+  [ -e "$wt" ] && die "$wt exists but is no worktree of this clone - move it aside first"
+  git worktree add "$wt" "$branch"
+  outfit_worktree "$wt"
+  printf '\nworktree at %s on %s; CLAUDE.md, CLAUDE-history.md and stack seeded\n' \
+    "$(wt_show "$wt")" "$branch"
+  printf 'stack: ./stack dev %s serves it on :%s; ./stack wt %s --teardown when done\n' \
+    "$branch" "$DEV_VITE_PORT" "$branch"
+}
+
+cmd_pr() {
+  local branch=${1:-}
+  [ -n "$branch" ] || die 'usage: ./stack pr <branch>'
+  grep -qxF "$branch" <<<"$(rows | cut -f1)" || die "$branch is not in the ledger"
+  local intent base; intent=$(field "$branch" 3); base=$(field "$branch" 2)
+  [ "$intent" = local ] && die "$branch is intent=local - it never gets a PR"
+  if [ "$base" != "$UPSTREAM" ]; then
+    printf 'stack: %s is based on %s, so the PR diff carries that parent until it lands.\n' \
+      "$branch" "$base" >&2
+    printf 'stack: open it anyway? [y/N] ' >&2; read -r ans
+    [ "$ans" = y ] || exit 1
+  fi
+  sync_mains
+  git push -u origin "$branch"
+  gh pr create --repo "$REPO" --base main --head "$FORK:$branch" --fill
+}
+
+cmd_daily() {
+  local quick=no cont=no a
+  for a in "$@"; do
+    case "$a" in
+      --quick)    quick=yes ;;
+      --continue) cont=yes ;;
+      *)          die "unknown flag $a" ;;
+    esac
+  done
+  cd "$ROOT"
+  # Both my/daily hooks refuse everything that is not the rebuild. This env var is the only
+  # thing either accepts - deliberately not merge state, which a hand merge reproduces exactly
+  # (same leaf, same MERGE_HEAD sha, after an abort).
+  export STACK_DAILY=1
+  # Run state for --continue, written only when a run stops on a conflict and consumed by the
+  # continuation. It records the leaf and the HEAD it stopped at, so a --continue against some
+  # other merge is refused. It proves a run stopped here, not that this merge is the one it
+  # started: you could recreate the same merge by hand and reuse it. What it does buy is that
+  # `--continue` cannot be aimed at an unrelated merge, or run at all after an abort.
+  local run; run=$(git rev-parse --git-path stack-daily-run)
+
+  if [ "$cont" = yes ]; then
+    # Finishing the conflict a previous run stopped on, in the tree it left behind.
+    [ "$(git symbolic-ref --quiet --short HEAD)" = my/daily ] || die 'not on my/daily'
+    [ -f "$run" ] || die 'no stopped rebuild to continue - run ./stack daily'
+    local want_leaf want_head merge_head
+    read -r want_leaf want_head < "$run"
+    merge_head=$(git rev-parse --git-path MERGE_HEAD)
+    [ -e "$merge_head" ] || die 'no merge in progress - run ./stack daily'
+    [ "$(cat "$merge_head")" = "$want_leaf" ] \
+      || die 'the merge in progress is not the one the rebuild stopped on - git merge --abort, then ./stack daily'
+    [ "$(git rev-parse HEAD)" = "$want_head" ] \
+      || die 'my/daily moved since the rebuild stopped - git merge --abort, then ./stack daily'
+    [ -z "$(git diff --name-only --diff-filter=U)" ] \
+      || die 'unresolved paths remain - resolve them, then `git add -u` (never -A)'
+    ! git grep -qI '^<<<<<<< ' -- . || die 'conflict markers still in the tree'
+    git commit --no-edit
+    rm -f "$run"
+  else
+    # Tracked changes block the checkout halfway through; untracked ones are fine and
+    # must never be staged into a merge commit (`git add -u`, never `-A`).
+    git diff --quiet && git diff --cached --quiet || die 'commit or stash tracked changes first'
+    rm -f "$run"
+    sync_mains
+    git switch -C my/daily "$UPSTREAM"
+  fi
+
+  local b replayed=
+  # One at a time: `git merge A B C` picks the octopus strategy, which aborts on any
+  # conflict without staging anything, so rerere records nothing. On --continue the leaves
+  # already merged are no-ops, so the same loop resumes the run.
+  for b in $(leaves); do
+    if ! git merge --no-edit "$b"; then
+      # `git merge` always exits non-zero once a conflict happened, even when rerere
+      # (autoUpdate) replayed and staged every one of them - only the commit is left.
+      if [ -z "$(git diff --name-only --diff-filter=U)" ] && ! git grep -qI '^<<<<<<< ' -- . ; then
+        git commit --no-edit
+        replayed="$replayed $b"
+      else
+        printf '%s %s\n' "$(git rev-parse "$b")" "$(git rev-parse HEAD)" > "$run"
+        printf '\nstack: CONFLICT in %s. Resolve it, `git add -u` (never -A), then\n' "$b" >&2
+        printf 'stack:   ./stack daily --continue\n' >&2
+        printf 'stack: which commits this merge and finishes the leaves after it. A plain\n' >&2
+        printf 'stack: `git merge --continue` is refused: the hooks cannot tell it apart from\n' >&2
+        printf 'stack: a hand merge of the same leaf. Aborting instead is fine - then the\n' >&2
+        printf 'stack: whole run starts over with ./stack daily.\n' >&2
+        exit 1
+      fi
+    fi
+  done
+  rm -f "$run"
+
+  # `npm run build` alone is NOT enough here: npm is configured with ignore-scripts=true on
+  # this machine, so the `prebuild:server` clean and the `postbuild:server` promotion never
+  # fire. tsc emits into dist-server.next/ and, without the promote, dist-server/ keeps
+  # serving whatever it held - silently, because the build itself succeeds. That is how the
+  # backend sat two days behind on 2026-08-18 while every rebuild reported success. Both
+  # steps are therefore run explicitly, in the order package.json defines them.
+  rm -rf dist-server.next
+  npm run build
+  node scripts/promote-dist-server.mjs
+  if [ "$quick" = no ]; then
+    # Serialized: the default parallel workers fail agent.routes.test.ts on pristine
+    # upstream/main too, and that failure would swallow the restart below.
+    npx tsx --tsconfig server/tsconfig.json --test --test-concurrency=1 \
+      "server/**/*.test.ts" "server/**/*.test.js"
+  fi
+  local now; now=$(server_hash)
+  local pm2_pid; pm2_pid=$(pm2 pid "$PM2_APP" 2>/dev/null | tr -d '[:space:]')
+  if [ "$now" != "$(cat "$SERVED_STAMP" 2>/dev/null)" ] || [ -z "$pm2_pid" ] || [ "$pm2_pid" = 0 ]; then
+    pm2 restart "$PM2_APP"   # dist-server/ loads once at start: not live until this
+    printf '%s\n' "$now" > "$SERVED_STAMP"
+  else
+    printf 'stack: dist-server/ unchanged - pm2 left alone. dist/ is served per request,\n'
+    printf 'stack: so the client rebuild is live on the next page load.\n'
+  fi
+  printf '\nmy/daily %s on %s\n' "$(git rev-parse --short=10 HEAD)" "$(git rev-parse --short=10 $UPSTREAM)"
+  if [ -n "$replayed" ]; then
+    # A replayed resolution is only as current as when it was recorded, so it can quietly
+    # favour a stale side while the merge looks clean. Re-check any PR involved.
+    printf 'rerere replayed a resolution merging:%s\n' "$replayed"
+  fi
+}
+
+# Hot-reload development, with pm2 and my/daily untouched. The client runs on vite with HMR;
+# the server runs from source under `tsx watch`, so a server edit reloads that process in
+# under a second instead of restarting the daily instance. vite proxies /api, /ws, /shell and
+# /plugin-ws to SERVER_PORT, which is why the dev backend must be up for the page to work.
+cmd_dev() {
+  local branch=${1:-} fresh=no
+  [ -n "$branch" ] || die 'usage: ./stack dev <branch> [--fresh]'
+  [ "${2:-}" = --fresh ] && fresh=yes
+  [ "$branch" = my/daily ] && die 'my/daily is the integration tree, not a development branch'
+  grep -qxF "$branch" <<<"$(rows | cut -f1)" || die "$branch is not in the ledger"
+  local wt; wt=$(worktree_of "$branch")
+  [ -n "$wt" ] || die "$branch has no worktree - ./stack wt $branch creates one"
+
+  cd "$wt"
+  export HOST=127.0.0.1 SERVER_PORT="$DEV_SERVER_PORT" VITE_PORT="$DEV_VITE_PORT"
+  if [ "$fresh" = yes ]; then
+    # A throwaway DB, so ~/.cloudcli/auth.db is never touched by a dev run.
+    export DATABASE_PATH="/tmp/ccui-dev-$(date +%s).db"
+    printf 'stack: fresh DB at %s\n' "$DATABASE_PATH"
+  fi
+  # vite maps a loopback HOST to `localhost`, which Node resolves to ::1, so it binds IPv6
+  # only: http://127.0.0.1:VITE_PORT is refused while http://localhost:VITE_PORT answers.
+  printf 'stack: %s -> http://localhost:%s (HMR), api on :%s. pm2 :3111 keeps serving my/daily.\n' \
+    "$branch" "$VITE_PORT" "$SERVER_PORT"
+  exec npx concurrently --kill-others --names server,client -c blue,green \
+    'npm run server:dev-watch' 'npm run client'
+}
+
+# Names a set of added lines *declares*, which is what duplicated logic looks like: two branches
+# defining the same thing. Bare references are excluded on purpose - both sides of an additive
+# collision read `message.content`, and counting that would make every one of them look duplicated.
+# String bodies are stripped first, so a Tailwind class list never becomes a name.
+audit_names() {
+  sed -E -e "s/'[^']*'//g" -e 's/"[^"]*"//g' -e 's/`[^`]*`//g' \
+    | grep -oE '(const|let|var|function|class|type|interface|enum)[[:space:]]+[A-Za-z_][A-Za-z0-9_]{3,}|^[[:space:]]*[A-Za-z_][A-Za-z0-9_]{3,}[[:space:]]*[:(]' \
+    | grep -oE '[A-Za-z_][A-Za-z0-9_]{3,}' \
+    | grep -vwE 'const|let|var|function|class|type|interface|enum|case|return|await|async|else|catch' \
+    | sort -u || true
+}
+
+# Every conflict block of a diff3-marked file, reduced to what each side did to the base: lines it
+# added, lines it removed, and the added text itself. A whole-file diff cannot answer this - both
+# sides of a deletion boundary also add lines elsewhere in the same file, which is what made an
+# earlier `--numstat` version call `useChatSessionState.ts` an addition collision.
+AUDIT_BLOCKS='
+function emit() {
+  oadd = tadd = orem = trem = 0
+  for (i = 1; i <= no; i++) if (!(Oa[i] in Bs)) { oadd++; print "OADD\t" Oa[i] }
+  for (i = 1; i <= nt; i++) if (!(Ta[i] in Bs)) { tadd++; print "TADD\t" Ta[i] }
+  for (i = 1; i <= nb; i++) { if (!(Ba[i] in Os)) orem++; if (!(Ba[i] in Ts)) trem++ }
+  print "HDR\t" oadd "\t" tadd "\t" orem "\t" trem
+}
+/^<<<<<<</ { s = 1; no = nb = nt = 0; delete Oa; delete Ba; delete Ta; delete Os; delete Bs; delete Ts; next }
+/^\|\|\|\|\|\|\|/ { s = 2; next }
+/^=======$/ { s = 3; next }
+/^>>>>>>>/ { emit(); s = 0; next }
+s == 1 { Oa[++no] = $0; Os[$0] = 1; next }
+s == 2 { Ba[++nb] = $0; Bs[$0] = 1; next }
+s == 3 { Ta[++nt] = $0; Ts[$0] = 1; next }
+'
+
+# One conflicted merge, already staged in the scratch worktree, described file by file. Shared
+# between the two passes: the merges the rebuild has already made, and the leaves it has not.
+audit_classify() {
+  local tmp=$1 label=$2 f recs b l oadd tadd shared
+  printf '  %s\n' "$label"
+  for f in $(git -C "$tmp" diff --name-only --diff-filter=U); do
+    recs=$(awk "$AUDIT_BLOCKS" "$tmp/$f")
+    b=$(grep -c '^HDR' <<<"$recs" || true)
+    # Marker and base lines are git's scaffolding, not the question: count only what each side
+    # wrote, so the tally stays the work a human would actually have to read.
+    l=$(awk '/^<<<<<<</{i=1;next} /^\|\|\|\|\|\|\|/{i=0;next} /^=======$/{i=1;next} /^>>>>>>>/{i=0;next} i{n++} END{print n+0}' "$tmp/$f")
+    oadd=$(awk -F'\t' '$1=="HDR"{s+=$2} END{print s+0}' <<<"$recs")
+    tadd=$(awk -F'\t' '$1=="HDR"{s+=$3} END{print s+0}' <<<"$recs")
+    AUDIT_F=$((AUDIT_F + 1)); AUDIT_B=$((AUDIT_B + b)); AUDIT_L=$((AUDIT_L + l))
+    printf '    %-50s %2s blocks %3s lines  ' "$f" "$b" "$l"
+    if [ "$oadd" = 0 ] && [ "$tadd" = 0 ]; then
+      # Neither side added a line: the branches disagree over what was deleted. That is what
+      # keeping a branch cut from upstream/main costs while another removes what it still uses,
+      # and restacking it to end the conflict is exactly what would end its PR-ability.
+      printf 'deletion boundary: structural\n'
+    elif [ "$oadd" = 0 ] || [ "$tadd" = 0 ]; then
+      printf 'one side adds, one deletes: pick a side\n'
+    else
+      # A shared name is a hint, never a verdict: two branches that both render `message.content`
+      # share a field, not logic. It is counted apart from the findings so a heuristic can never
+      # be the thing that fails the audit.
+      shared=$(comm -12 <(grep '^OADD' <<<"$recs" | cut -f2- | audit_names) \
+                        <(grep '^TADD' <<<"$recs" | cut -f2- | audit_names) | head -4 | tr '\n' ' ')
+      if [ -n "$shared" ]; then
+        printf 'both sides add, sharing: %s\n' "$shared"
+        printf '    %-50s ^ hint: check whether that logic lives on both branches\n' ''
+        AUDIT_H=$(( ${AUDIT_H:-0} + 1 ))
+      else
+        printf 'both sides add, disjoint names\n'
+      fi
+    fi
+  done
+}
+
+# Replay every merge the rebuild makes with rerere switched off, so each recurring conflict shows
+# as the question a human would answer if it were disabled. Most are structural - the price of
+# keeping branches independently PR-able - and recur by design. The ones worth fixing have a
+# cause: a branch whose declared base moved underneath it, or the same logic on two branches.
+# Exits non-zero when it finds one, so a rebuild can be gated on it.
+cmd_audit() {
+  git rev-parse -q --verify my/daily >/dev/null || die 'no my/daily yet - run ./stack daily first'
+  AUDIT_F=0 AUDIT_B=0 AUDIT_L=0 AUDIT_D=0
+
+  printf '=== bases ===\n'
+  local drift=0
+  while IFS=$'\t' read -r branch base intent note; do
+    git rev-parse -q --verify "$branch" >/dev/null || continue
+    local mb touched moved forked
+    mb=$(git merge-base "$base" "$branch" 2>/dev/null) || continue
+    [ "$mb" = "$(git rev-parse "$base")" ] && continue
+    touched=$(git diff --name-only "$mb" "$branch")
+    [ -n "$touched" ] || continue
+    moved=$(git diff --name-only "$mb" "$base" -- $touched | tr '\n' ' ')
+    [ -n "$moved" ] || continue
+    drift=$((drift + 1))
+    printf '  %-34s %s behind %s, which moved: %s\n' \
+      "$branch" "$(git rev-list --count "$mb..$base")" "$base" "$moved"
+    # The base advancing over a file the branch edits is a conflict cause, but not a mistake:
+    # upstream moves, and rebasing a branch with an open PR is a judgment call, so it only ever
+    # explains a conflict below. A fork point that is the tip of some *other* ref is different -
+    # the branch was cut from that ref and the ledger names a base it never sat on, which is how
+    # `local/mobile-sidebar` claimed upstream/main while carrying a patch written for v1.36.3.
+    # `grep -vx` exits 1 when it filters everything away, which under `pipefail` would end the run
+    # on the ordinary case of a fork point no other ref points at.
+    forked=$( { git for-each-ref --points-at "$mb" --format='%(refname:short)' refs/heads refs/remotes \
+      | grep -vxF "$branch" | grep -vxF "$base" | head -1; } || true)
+    if [ -n "$forked" ]; then
+      printf '  %-34s cut from %s, not %s: git rebase --onto %s %s %s\n' \
+        '' "$forked" "$base" "$base" "$mb" "$branch"
+      AUDIT_D=$((AUDIT_D + 1))
+    fi
+  done < <(rows)
+  [ "$drift" = 0 ] && printf '  every row still sits on the base it claims\n'
+
+  printf '\n=== conflicts, rerere off ===\n'
+  AUDIT_TMP=$(mktemp -d)
+  trap 'git worktree remove --force "$AUDIT_TMP" >/dev/null 2>&1 || true; rm -rf "$AUDIT_TMP"' EXIT
+  git worktree add --detach "$AUDIT_TMP" "$UPSTREAM" >/dev/null 2>&1
+  local m subject p1 p2 leaf out probe lf
+  while read -r m subject; do
+    p1=$(git rev-parse "$m^1"); p2=$(git rev-parse "$m^2")
+    leaf=${subject#Merge branch \'}; leaf=${leaf%\' into my/daily}
+    git -C "$AUDIT_TMP" checkout -q --detach "$p1"
+    # diff3 keeps the base section in the markers, which is the only way to tell a line this side
+    # added from one the other side deleted.
+    out=$(git -C "$AUDIT_TMP" -c rerere.enabled=false -c merge.conflictStyle=diff3 \
+      merge --no-edit "$p2" 2>&1) || true
+    if grep -q CONFLICT <<<"$out"; then audit_classify "$AUDIT_TMP" "$leaf"; fi
+    git -C "$AUDIT_TMP" merge --abort 2>/dev/null || true
+  done < <(git log --merges --reverse --format='%H %s' "$UPSTREAM..my/daily" | grep 'into my/daily$')
+
+  # A leaf added since the last rebuild has no merge commit to replay, so a retrospective-only
+  # pass would report success while saying nothing about the conflict the next rebuild will hit.
+  # Merging onto the tip the earlier leaves built is what that rebuild does, so the probe advances
+  # after every clean merge: two new leaves that conflict only with each other are invisible to a
+  # probe frozen at my/daily. The scratch worktree is detached, so my/daily is never written here.
+  probe=$(git rev-parse my/daily)
+  for lf in $(leaves); do
+    git rev-parse -q --verify "$lf" >/dev/null || continue
+    git merge-base --is-ancestor "$lf" "$probe" && continue
+    git -C "$AUDIT_TMP" checkout -q --detach "$probe"
+    out=$(git -C "$AUDIT_TMP" -c rerere.enabled=false -c merge.conflictStyle=diff3 \
+      merge --no-edit "$lf" 2>&1) || true
+    if grep -q CONFLICT <<<"$out"; then
+      audit_classify "$AUDIT_TMP" "$lf (not yet in my/daily)"
+      git -C "$AUDIT_TMP" merge --abort 2>/dev/null || true
+    else
+      probe=$(git -C "$AUDIT_TMP" rev-parse HEAD)
+    fi
+  done
+
+  # A resolution is only reachable while some conflict still produces its exact text, so entries
+  # beyond the live count are history: inert, but the pool an accidental text match would draw on.
+  local cache; cache="$(git rev-parse --git-common-dir)/rr-cache"
+  printf '\n=== rerere cache ===\n'
+  if [ -d "$cache" ]; then
+    local total held
+    total=$(find "$cache" -mindepth 1 -maxdepth 1 -type d | wc -l)
+    held=$(find "$cache" -mindepth 2 -name 'postimage*' -printf '%h\n' | sort -u | wc -l)
+    printf '  %s entries, %s hold a resolution, %s conflicts live in the rebuild\n' \
+      "$total" "$held" "$AUDIT_F"
+    # A count, not a reachability proof: no cache key is ever hashed against a live preimage, so
+    # this says the cache is bigger than this rebuild needs and nothing sharper than that.
+    if [ "$held" -gt "$AUDIT_F" ]; then
+      printf '  %s more than it reaches: consider gc.rerereResolved, then git rerere gc\n' \
+        "$((held - AUDIT_F))"
+    fi
+  else
+    printf '  none\n'
+  fi
+
+  printf '\nper rebuild: %s files, %s blocks, %s lines to answer by hand with rerere off\n' \
+    "$AUDIT_F" "$AUDIT_B" "$AUDIT_L"
+  [ "${AUDIT_H:-0}" = 0 ] || printf 'stack: %s hint(s) above, none conclusive on its own\n' "${AUDIT_H:-0}"
+  if [ "$AUDIT_D" != 0 ]; then
+    printf 'stack: %s finding(s) with a cause to fix\n' "$AUDIT_D" >&2
+    return 1
+  fi
+  printf 'stack: no wrong-lineage base - every conflict is structural\n'
+}
+
+case "${1:-ls}" in
+  sync)  shift || true; sync_mains ;;
+  ls)    shift || true; need_ledger; cmd_ls ;;
+  new)   shift; need_ledger; cmd_new "$@" ;;
+  wt)    shift; need_ledger; cmd_wt "$@" ;;
+  pr)    shift; need_ledger; cmd_pr "$@" ;;
+  dev)   shift; need_ledger; cmd_dev "$@" ;;
+  daily) shift; need_ledger; cmd_daily "$@" ;;
+  setup) shift; cmd_setup "$@" ;;
+  audit) shift; need_ledger; cmd_audit ;;
+  *)     sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac
