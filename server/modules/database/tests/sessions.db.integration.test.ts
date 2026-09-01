@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection } from '@/modules/database/connection.js';
+import { closeConnection, getConnection } from '@/modules/database/connection.js';
 import { initializeDatabase } from '@/modules/database/init-db.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
@@ -53,22 +53,41 @@ test('session archive queries hide archived rows from active project views', asy
   });
 });
 
-test('createSession reactivates archived rows when the session becomes active again', async () => {
+test('full rescans preserve archived sessions while live updates reactivate them', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createSession('session-reused', 'claude', '/workspace/demo-project', 'First Name');
     sessionsDb.updateSessionIsArchived('session-reused', true);
 
-    sessionsDb.createSession('session-reused', 'claude', '/workspace/demo-project', 'Updated Name');
+    sessionsDb.createSession(
+      'session-reused',
+      'claude',
+      '/workspace/demo-project',
+      'Rescanned Name',
+      undefined,
+      undefined,
+      undefined,
+      { preserveArchived: true },
+    );
+    assert.equal(sessionsDb.getSessionById('session-reused')?.isArchived, 1);
+    assert.equal(sessionsDb.getSessionById('session-reused')?.custom_name, 'Rescanned Name');
 
-    const activeSessions = sessionsDb.getAllSessions();
-    const archivedSessions = sessionsDb.getArchivedSessions();
-    const restoredSession = sessionsDb.getSessionById('session-reused');
+    sessionsDb.createAppSession('legacy-conflict', 'claude', '/workspace/demo-project');
+    sessionsDb.updateSessionIsArchived('legacy-conflict', true);
+    sessionsDb.createSession(
+      'legacy-conflict',
+      'claude',
+      '/workspace/demo-project',
+      'Rescanned legacy row',
+      undefined,
+      undefined,
+      undefined,
+      { preserveArchived: true },
+    );
+    assert.equal(sessionsDb.getSessionById('legacy-conflict')?.isArchived, 1);
 
-    assert.equal(activeSessions.length, 1);
-    assert.equal(activeSessions[0]?.session_id, 'session-reused');
-    assert.equal(activeSessions[0]?.custom_name, 'Updated Name');
-    assert.equal(archivedSessions.length, 0);
-    assert.equal(restoredSession?.isArchived, 0);
+    sessionsDb.createSession('session-reused', 'claude', '/workspace/demo-project', 'Live Name');
+    assert.equal(sessionsDb.getSessionById('session-reused')?.isArchived, 0);
+    assert.equal(sessionsDb.getSessionById('session-reused')?.custom_name, 'Live Name');
   });
 });
 
@@ -112,6 +131,73 @@ test('recent sessions are globally ordered, paginated, and limited to visible co
       secondPage.sessions.map((session) => session.session_id),
       ['session-middle', 'session-oldest'],
     );
+  });
+});
+
+test('sidebar pages, recents, archives, and counts exclude one-shot sessions', async () => {
+  await withIsolatedDatabase(() => {
+    const projectPath = '/workspace/one-shot-filter';
+    sessionsDb.createSession(
+      'visible-session',
+      'omp',
+      projectPath,
+      'Visible',
+      '2026-07-18T10:00:00.000Z',
+      '2026-07-18T10:00:00.000Z',
+      null,
+    );
+    sessionsDb.createSession(
+      'hidden-session',
+      'claude',
+      projectPath,
+      'Print only',
+      '2026-07-18T11:00:00.000Z',
+      '2026-07-18T11:00:00.000Z',
+      null,
+      { isOneShot: true },
+    );
+
+    const projectPage = sessionsDb.getSessionsByProjectPathPage(projectPath, 1, 0);
+    const recentPage = sessionsDb.getRecentSessionsPage(1, 0);
+
+    assert.equal(sessionsDb.getSessionById('hidden-session')?.is_one_shot, 1);
+    assert.equal(sessionsDb.countSessionsByProjectPath(projectPath), 1);
+    assert.deepEqual(projectPage.map((session) => session.session_id), ['visible-session']);
+    assert.equal(recentPage.total, 1);
+    assert.deepEqual(recentPage.sessions.map((session) => session.session_id), ['visible-session']);
+    assert.deepEqual(
+      sessionsDb.getAllSessions().map((session) => session.session_id).sort(),
+      ['hidden-session', 'visible-session'],
+      'direct lookup and internal discovery retain hidden sessions',
+    );
+
+    sessionsDb.updateSessionIsArchived('hidden-session', true);
+    sessionsDb.updateSessionIsArchived('visible-session', true);
+    assert.deepEqual(
+      sessionsDb.getArchivedSessions().map((session) => session.session_id),
+      ['visible-session'],
+    );
+  });
+});
+
+test('adding one-shot storage resets the provider scan cursor for backfill', async () => {
+  await withIsolatedDatabase(async () => {
+    const db = getConnection();
+    db.exec(`
+      INSERT INTO scan_state (id, last_scanned_at) VALUES (1, '2026-08-01T00:00:00.000Z');
+      ALTER TABLE sessions DROP COLUMN is_one_shot;
+    `);
+    closeConnection();
+
+    await initializeDatabase();
+    const migratedDb = getConnection();
+    const columns = migratedDb.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    const scanState = migratedDb.prepare(
+      'SELECT last_scanned_at FROM scan_state WHERE id = 1',
+    ).get() as { last_scanned_at: string | null };
+
+    assert.ok(columns.some((column) => column.name === 'is_one_shot'));
+    assert.equal(scanState.last_scanned_at, null);
   });
 });
 

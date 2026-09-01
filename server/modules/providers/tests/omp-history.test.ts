@@ -86,6 +86,7 @@ describe('omp synchronizer + fetchHistory', () => {
     assert.equal(row.project_path, CWD);
     assert.equal(row.custom_name, 'My omp Session');
     assert.equal(row.jsonl_path, jsonlPath);
+    assert.equal(row.is_one_shot, 0);
 
     // --- fetchHistory (full) ---
     const provider = new OmpSessionsProvider();
@@ -110,6 +111,57 @@ describe('omp synchronizer + fetchHistory', () => {
     assert.equal(tail.messages.at(-1)!.kind, 'tool_use', 'newest rendered entry is last');
     assert.deepEqual(tail.messages.at(-1)!.toolResult, { content: 'file.txt', isError: false });
 
+    closeConnection();
+  });
+
+  it('classifies direct and deeply nested background-agent transcripts as one-shot', async () => {
+    const { closeConnection, initializeDatabase, sessionsDb } = await import('@/modules/database/index.js');
+    const { OmpSessionSynchronizer } = await import('@/modules/providers/list/omp/omp-session-synchronizer.provider.js');
+
+    closeConnection();
+    await initializeDatabase();
+
+    const parentDirectory = path.join(
+      tempHome,
+      '.omp',
+      'agent',
+      'sessions',
+      '-work-omp-proj',
+      '2026-07-21T00-00-00-000Z_019fecfb-e038-7000-aac5-9f3532479478',
+    );
+    const fixtures = [
+      {
+        sessionId: '01a0436d-32ac-73e2-89db-a1ae898a653c',
+        relativePath: 'BackgroundScout.jsonl',
+      },
+      {
+        sessionId: '01a0436d-32ac-73e2-89db-a1ae898a653d',
+        relativePath: path.join('nested', 'child', 'BackgroundWorker.jsonl'),
+      },
+    ];
+    const synchronizer = new OmpSessionSynchronizer();
+
+    for (const fixture of fixtures) {
+      const backgroundPath = path.join(parentDirectory, fixture.relativePath);
+      await mkdir(path.dirname(backgroundPath), { recursive: true });
+      await writeFile(
+        backgroundPath,
+        [
+          { type: 'title', v: 1, title: '' },
+          {
+            type: 'session',
+            version: 3,
+            id: fixture.sessionId,
+            timestamp: '2026-07-21T00:01:00.000Z',
+            cwd: CWD,
+          },
+        ].map((line) => JSON.stringify(line)).join('\n') + '\n',
+      );
+
+      const upsertedId = await synchronizer.synchronizeFile(backgroundPath);
+      assert.equal(upsertedId, fixture.sessionId);
+      assert.equal(sessionsDb.getSessionById(fixture.sessionId)?.is_one_shot, 1);
+    }
     closeConnection();
   });
 

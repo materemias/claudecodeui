@@ -60,6 +60,7 @@ async function buildSessionUpsertedEvent(
       summary: row.custom_name || '',
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+      isOneShot: Boolean(row.is_one_shot),
       selection: {
         model: row.model?.trim() || null,
         effort: row.effort?.trim() || null,

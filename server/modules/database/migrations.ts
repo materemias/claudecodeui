@@ -472,6 +472,23 @@ const addSessionLiveConfigColumns = (db: Database): void => {
 };
 
 /**
+ * Adds one-shot classification and schedules one full provider scan so
+ * pre-existing print and background transcripts receive the new signal.
+ */
+const addSessionOneShotColumn = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  if (columnNames.includes('is_one_shot')) {
+    return;
+  }
+
+  db.transaction(() => {
+    addColumnToTableIfNotExists(db, 'sessions', columnNames, 'is_one_shot', 'BOOLEAN DEFAULT 0');
+    db.exec(LAST_SCANNED_AT_SQL);
+    db.exec('UPDATE scan_state SET last_scanned_at = NULL');
+  })();
+};
+
+/**
  * Adds the last provider title used as the retitle watermark.
  */
 const addSessionProviderNameColumn = (db: Database): void => {
@@ -586,6 +603,7 @@ export const runMigrations = (db: Database) => {
     addSessionProviderNameColumn(db);
     addSessionNameSourceColumn(db);
     addForkedFromSessionIdColumn(db);
+    addSessionOneShotColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
 
