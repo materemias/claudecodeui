@@ -57,10 +57,10 @@ export default function SidebarFooter({
         </>
       )}
 
-      {/* Update banner */}
+      {/* Update banner, desktop only */}
       {updateAvailable && (
         <>
-          <div className="nav-divider" />
+          <div className="nav-divider hidden md:block" />
           {/* Desktop update */}
           <div className="hidden px-2 py-1.5 md:block">
             <button
@@ -76,27 +76,6 @@ export default function SidebarFooter({
                   {releaseInfo?.title || `v${latestVersion}`}
                 </span>
                 <span className="text-[10px] text-blue-500/70 dark:text-blue-400/60">
-                  {t('version.updateAvailable')}
-                </span>
-              </div>
-            </button>
-          </div>
-
-          {/* Mobile update */}
-          <div className="px-3 py-2 md:hidden">
-            <button
-              className="flex h-11 w-full items-center gap-3 rounded-xl border border-blue-200/60 bg-blue-50/80 px-3.5 transition-all active:scale-[0.98] dark:border-blue-700/40 dark:bg-blue-900/15"
-              onClick={onShowVersionModal}
-            >
-              <div className="relative flex-shrink-0">
-                <ArrowUpCircle className="h-4 w-4 text-blue-500 dark:text-blue-400" />
-                <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
-              </div>
-              <div className="min-w-0 flex-1 text-left">
-                <span className="block truncate text-sm font-normal text-blue-600 dark:text-blue-300">
-                  {releaseInfo?.title || `v${latestVersion}`}
-                </span>
-                <span className="text-xs text-blue-500/70 dark:text-blue-400/60">
                   {t('version.updateAvailable')}
                 </span>
               </div>
@@ -159,46 +138,36 @@ export default function SidebarFooter({
         </div>
       )}
 
-      {/* Mobile Report Issue */}
-      <div className="px-3 pt-3 md:hidden">
+      {/* Mobile actions */}
+      <div className="flex items-center gap-1 px-3 pb-3 pt-2 md:hidden">
         <a
           href={GITHUB_ISSUES_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex h-10 w-full items-center gap-3 rounded-xl bg-muted/40 px-3.5 transition-all hover:bg-muted/60 active:scale-[0.98]"
+          aria-label={t('actions.reportIssue')}
+          title={t('actions.reportIssue')}
+          className="flex h-9 flex-1 items-center justify-center rounded-lg bg-muted/40 text-muted-foreground transition-all hover:bg-muted/60 hover:text-foreground active:scale-[0.98]"
         >
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-background/80">
-            <Bug className="h-4 w-4 text-muted-foreground" />
-          </div>
-          <span className="text-sm font-normal text-foreground">{t('actions.reportIssue')}</span>
+          <Bug className="h-4 w-4" />
         </a>
-      </div>
-
-      {/* Mobile Discord */}
-      <div className="px-3 pt-2 md:hidden">
         <a
           href={DISCORD_INVITE_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex h-10 w-full items-center gap-3 rounded-xl bg-muted/40 px-3.5 transition-all hover:bg-muted/60 active:scale-[0.98]"
+          aria-label={t('actions.joinCommunity')}
+          title={t('actions.joinCommunity')}
+          className="flex h-9 flex-1 items-center justify-center rounded-lg bg-muted/40 text-muted-foreground transition-all hover:bg-muted/60 hover:text-foreground active:scale-[0.98]"
         >
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-background/80">
-            <DiscordIcon className="h-4 w-4 text-muted-foreground" />
-          </div>
-          <span className="text-sm font-normal text-foreground">{t('actions.joinCommunity')}</span>
+          <DiscordIcon className="h-4 w-4" />
         </a>
-      </div>
-
-      {/* Mobile settings */}
-      <div className="px-3 pb-3 pt-2 md:hidden">
         <button
-          className="flex h-10 w-full items-center gap-3 rounded-xl bg-muted/40 px-3.5 transition-all hover:bg-muted/60 active:scale-[0.98]"
+          type="button"
+          aria-label={t('actions.settings')}
+          title={t('actions.settings')}
+          className="flex h-9 flex-1 items-center justify-center rounded-lg bg-muted/40 text-muted-foreground transition-all hover:bg-muted/60 hover:text-foreground active:scale-[0.98]"
           onClick={onShowSettings}
         >
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-background/80">
-            <Settings className="h-4 w-4 text-muted-foreground" />
-          </div>
-          <span className="text-sm font-normal text-foreground">{t('actions.settings')}</span>
+          <Settings className="h-4 w-4" />
         </button>
       </div>
     </div>
