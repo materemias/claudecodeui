@@ -72,6 +72,13 @@ function SidebarSessionItem({
   const showAttentionIndicator = needsAttention && !isSelected;
   const showRecentIndicator = !showAttentionIndicator && !isProcessing && sessionView.isActive;
   const providerLabel = PROVIDER_LABELS[session.__provider];
+  const rowStateClass = isSelected
+    ? 'border-primary bg-primary/15 ring-1 ring-primary/50 hover:bg-primary/20 dark:bg-primary/25 dark:hover:bg-primary/30'
+    : isProcessing
+      ? 'border-border/60 bg-muted/20 hover:bg-muted/25'
+      : sessionView.isActive
+        ? 'border-green-500/30 bg-green-50/5 hover:bg-green-50/10 dark:bg-green-900/5 dark:hover:bg-green-900/10'
+        : 'border-border/30 hover:bg-accent/50';
 
   // While editing, dismiss only when the user clicks outside the inline rename panel
   // (matches Escape / cancel-button behaviour). The mobile rename lives inside the
@@ -226,12 +233,7 @@ function SidebarSessionItem({
         <div
           className={cn(
             'p-2 mx-3 my-0.5 rounded-md bg-card border active:scale-[0.98] transition-all duration-150 relative',
-            isSelected ? 'bg-primary/5 border-primary/20' : '',
-            !isSelected && isProcessing
-              ? 'border-border/60 bg-muted/20'
-              : !isSelected && sessionView.isActive
-              ? 'border-green-500/30 bg-green-50/5 dark:bg-green-900/5'
-              : 'border-border/30',
+            rowStateClass,
           )}
           onClick={selectMobileSession}
         >
@@ -248,7 +250,10 @@ function SidebarSessionItem({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <div
-                  className="min-w-0 flex-1 truncate text-sm font-normal text-foreground"
+                  className={cn(
+                    'min-w-0 flex-1 truncate text-sm text-foreground',
+                    isSelected ? 'font-medium' : 'font-normal',
+                  )}
                   title={sessionView.sessionName}
                 >
                   {sessionView.sessionName}
@@ -425,15 +430,11 @@ function SidebarSessionItem({
       <div>
         <a
           href={`/session/${session.id}`}
+          aria-current={isSelected ? 'page' : undefined}
           className={cn(
             buttonVariants({ variant: 'ghost' }),
-            'h-auto w-full justify-start rounded-md border bg-card p-2 pr-11 text-left font-normal transition-all duration-150',
-            isSelected ? 'border-primary/20 bg-primary/5' : 'border-border/30',
-            !isSelected && isProcessing
-              ? 'border-border/60 bg-muted/20 hover:bg-muted/25'
-              : !isSelected && sessionView.isActive
-                ? 'border-green-500/30 bg-green-50/5 hover:bg-green-50/10 dark:bg-green-900/5 dark:hover:bg-green-900/10'
-                : 'hover:bg-accent/50',
+            'h-auto w-full justify-start rounded-md border bg-card p-2 pr-11 text-left font-normal transition-all duration-150 focus-visible:ring-2',
+            rowStateClass,
           )}
           // Left-click keeps in-app navigation; Ctrl/Cmd/middle-click and the
           // native right-click menu use the href to open a new tab/window.
@@ -455,7 +456,10 @@ function SidebarSessionItem({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <div
-                  className="min-w-0 flex-1 truncate text-sm font-normal text-foreground"
+                  className={cn(
+                    'min-w-0 flex-1 truncate text-sm text-foreground',
+                    isSelected ? 'font-medium' : 'font-normal',
+                  )}
                   title={sessionView.sessionName}
                 >
                   {sessionView.sessionName}
