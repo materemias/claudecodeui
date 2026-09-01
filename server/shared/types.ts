@@ -69,6 +69,27 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
 export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'omp';
 
 /**
+ * One currently running session returned by the provider sessions API.
+ *
+ * Processing rows belong to CloudCLI's runtime and remain interruptible through
+ * their chat run. Terminal rows are status-only observations of an external CLI.
+ */
+export type RunningSession =
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'processing';
+      startedAt: number;
+      lastSeq: number;
+    }
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'terminal';
+      lastSeq: 0;
+    };
+
+/**
  * One selectable model row in a provider model catalog.
  */
 export type ProviderModelOption = {

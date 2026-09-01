@@ -145,7 +145,7 @@ export type InstallMode = 'git' | 'npm';
 
 // ---------------------------
 
-//----------------- SESSION PROCESSING STATE ------------
+//----------------- SESSION RUNNING STATE ------------
 
 /** What a session that is currently producing a response is doing, as shown by the activity indicator. */
 export type SessionActivity = {
@@ -182,13 +182,40 @@ export type SyncProcessingSessions = (
 /** Reports whether one session is currently producing a response. */
 export type IsSessionProcessing = (sessionId?: string | null) => boolean;
 
-/** One running session as reported by the server, before it is folded into the client-side activity map. */
+/** One CloudCLI processing session reported by the server before it is folded into the client-side activity map. */
 export type SessionActivitySnapshot = {
   sessionId: string;
   statusText?: string | null;
   canInterrupt?: boolean;
   startedAt?: number;
 };
+
+/**
+ * One currently running session parsed from the provider sessions API.
+ *
+ * Processing rows belong to CloudCLI and carry interruption timing. Terminal
+ * rows describe an external CLI process and remain status-only.
+ */
+export type RunningSession =
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'processing';
+      startedAt: number;
+      lastSeq: number;
+    }
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'terminal';
+      lastSeq: 0;
+    };
+
+/** A status-only running session observed in an external terminal. */
+export type TerminalRunningSession = Extract<RunningSession, { source: 'terminal' }>;
+
+/** External terminal sessions keyed by their stable app-facing session id. */
+export type TerminalRunningSessionMap = ReadonlyMap<string, TerminalRunningSession>;
 
 // ---------------------------
 
@@ -1256,6 +1283,7 @@ export type SidebarProjectListProps = {
   onLoadMoreSessions: (projectId: string) => void;
   loadingMoreProjects: Set<string>;
   activeSessions: ReadonlySet<string>;
+  terminalRunningSessions: TerminalRunningSessionMap;
   attentionSessionIds: ReadonlySet<string>;
   forceExpanded?: boolean;
   isProjectStarred: (projectName: string) => boolean;

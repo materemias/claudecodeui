@@ -6,11 +6,13 @@ import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
+import { localAgentSessionsService } from '@/modules/providers/services/local-agent-sessions.service.js';
 import type {
   FetchHistoryOptions,
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  RunningSession,
 } from '@/shared/types.js';
 import { AppError, buildCloudCliSessionName, sliceTailPage } from '@/shared/utils.js';
 
@@ -119,18 +121,21 @@ export const sessionsService = {
   },
 
   /**
-   * Returns app-facing ids for provider runs that are currently processing.
-   *
-   * This is intentionally status-only: callers that only need sidebar activity
-   * indicators should not attach to chat streams or request replayed messages.
+   * Returns CloudCLI provider runs and supported provider CLIs attached to a
+   * host terminal. Processing wins when both sources resolve to the same stable
+   * app session id, so callers see one row and keep Web UI interruption state.
    */
-  listRunningSessions(): Array<{
-    sessionId: string;
-    provider: LLMProvider;
-    startedAt: number;
-    lastSeq: number;
-  }> {
-    return chatRunRegistry.listRunningRuns();
+  listRunningSessions(): RunningSession[] {
+    const sessions = new Map<string, RunningSession>();
+
+    for (const session of localAgentSessionsService.listRunningSessions()) {
+      sessions.set(session.sessionId, session);
+    }
+    for (const session of chatRunRegistry.listRunningRuns()) {
+      sessions.set(session.sessionId, { ...session, source: 'processing' });
+    }
+
+    return [...sessions.values()];
   },
 
   /**

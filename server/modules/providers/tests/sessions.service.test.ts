@@ -5,7 +5,9 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { closeConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { localAgentSessionsService } from '@/modules/providers/services/local-agent-sessions.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { chatRunRegistry } from '@/modules/websocket/index.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -27,6 +29,68 @@ async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promis
     await rm(tempDirectory, { recursive: true, force: true });
   }
 }
+
+test('running sessions merge terminal and CloudCLI sources by stable id', () => {
+  const originalRunningRuns = chatRunRegistry.listRunningRuns;
+  const originalTerminalSessions = localAgentSessionsService.listRunningSessions;
+
+  chatRunRegistry.listRunningRuns = () => [
+    {
+      sessionId: 'shared-session',
+      provider: 'codex',
+      startedAt: 100,
+      lastSeq: 7,
+    },
+    {
+      sessionId: 'web-session',
+      provider: 'claude',
+      startedAt: 200,
+      lastSeq: 2,
+    },
+  ];
+  localAgentSessionsService.listRunningSessions = () => [
+    {
+      sessionId: 'terminal-session',
+      provider: 'omp',
+      source: 'terminal',
+      lastSeq: 0,
+    },
+    {
+      sessionId: 'shared-session',
+      provider: 'codex',
+      source: 'terminal',
+      lastSeq: 0,
+    },
+  ];
+
+  try {
+    assert.deepEqual(sessionsService.listRunningSessions(), [
+      {
+        sessionId: 'terminal-session',
+        provider: 'omp',
+        source: 'terminal',
+        lastSeq: 0,
+      },
+      {
+        sessionId: 'shared-session',
+        provider: 'codex',
+        source: 'processing',
+        startedAt: 100,
+        lastSeq: 7,
+      },
+      {
+        sessionId: 'web-session',
+        provider: 'claude',
+        source: 'processing',
+        startedAt: 200,
+        lastSeq: 2,
+      },
+    ]);
+  } finally {
+    chatRunRegistry.listRunningRuns = originalRunningRuns;
+    localAgentSessionsService.listRunningSessions = originalTerminalSessions;
+  }
+});
 
 test('provider session id returns the mapped native id', { concurrency: false }, async () => {
   await withIsolatedDatabase(() => {

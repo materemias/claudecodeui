@@ -15,6 +15,7 @@ type SidebarSessionItemProps = {
   session: SessionWithProvider;
   selectedSession: ProjectSession | null;
   isProcessing: boolean;
+  isTerminal: boolean;
   needsAttention: boolean;
   currentTime: Date;
   /** Resolved for this row, so a keystroke elsewhere does not invalidate it. */
@@ -47,6 +48,7 @@ function SidebarSessionItem({
   session,
   selectedSession,
   isProcessing,
+  isTerminal,
   needsAttention,
   currentTime,
   isEditing,
@@ -71,6 +73,7 @@ function SidebarSessionItem({
   const [providerSessionId, setProviderSessionId] = useState<string | null>(null);
   const providerIdRequestRef = useRef(0);
   const showAttentionIndicator = needsAttention && !isSelected;
+  const showTerminalIndicator = isTerminal && !isProcessing;
   const showRecentIndicator = !showAttentionIndicator && !isProcessing && sessionView.isActive;
   const providerLabel = PROVIDER_LABELS[session.__provider];
 
@@ -200,22 +203,30 @@ function SidebarSessionItem({
 
   return (
     <div className="group relative">
-      {(showAttentionIndicator || showRecentIndicator) && (
+      {(showAttentionIndicator || showRecentIndicator || showTerminalIndicator) && (
         <div className="absolute left-0 top-1/2 -translate-x-1 -translate-y-1/2 transform">
           <Tooltip
             content={showAttentionIndicator
               ? t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })
-              : t('tooltips.activeSessionIndicator')}
+              : showTerminalIndicator
+                ? t('tooltips.localSessionIndicator', { defaultValue: 'Running in a local terminal' })
+                : t('tooltips.activeSessionIndicator')}
             position="right"
           >
             <div
               role="status"
               aria-label={showAttentionIndicator
                 ? t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })
-                : t('tooltips.activeSessionIndicator')}
+                : showTerminalIndicator
+                  ? t('tooltips.localSessionIndicator', { defaultValue: 'Running in a local terminal' })
+                  : t('tooltips.activeSessionIndicator')}
               className={cn(
-                'h-2 w-2 animate-pulse rounded-full',
-                showAttentionIndicator ? 'bg-amber-500' : 'bg-green-500',
+                'h-2 w-2 rounded-full',
+                showAttentionIndicator
+                  ? 'bg-amber-500 animate-pulse'
+                  : showTerminalIndicator
+                    ? 'bg-sky-500'
+                    : 'bg-green-500 animate-pulse',
               )}
             />
           </Tooltip>

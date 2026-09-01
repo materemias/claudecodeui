@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, TerminalRunningSessionMap } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -45,6 +45,7 @@ type UseSidebarControllerArgs = {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
   activeSessions: ReadonlySet<string>;
+  terminalRunningSessions: TerminalRunningSessionMap;
   isLoading: boolean;
   isMobile: boolean;
   t: TFunction;
@@ -65,6 +66,7 @@ export function useSidebarController({
   selectedProject,
   selectedSession: _selectedSession,
   activeSessions,
+  terminalRunningSessions,
   isLoading,
   isMobile,
   t,
@@ -119,8 +121,14 @@ export function useSidebarController({
   const onRefreshRef = useRef(onRefresh);
 
   const isSidebarCollapsed = !isMobile && !sidebarVisible;
-  const activeSessionIds = activeSessions;
-  const runningSessionsCount = activeSessionIds.size;
+  const runningSessionIds = useMemo(() => {
+    const sessionIds = new Set(activeSessions);
+    for (const sessionId of terminalRunningSessions.keys()) {
+      sessionIds.add(sessionId);
+    }
+    return sessionIds;
+  }, [activeSessions, terminalRunningSessions]);
+  const runningSessionsCount = runningSessionIds.size;
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -648,12 +656,12 @@ export function useSidebarController({
   );
 
   const runningProjects = useMemo(() => {
-    if (activeSessionIds.size === 0) {
+    if (runningSessionIds.size === 0) {
       return [];
     }
 
     return sortedProjects.reduce<Project[]>((acc, project) => {
-      const sessions = (project.sessions ?? []).filter((session) => activeSessionIds.has(String(session.id)));
+      const sessions = (project.sessions ?? []).filter((session) => runningSessionIds.has(String(session.id)));
       const runningCount = sessions.length;
 
       if (runningCount === 0) {
@@ -671,7 +679,7 @@ export function useSidebarController({
       });
       return acc;
     }, []);
-  }, [activeSessionIds, sortedProjects]);
+  }, [runningSessionIds, sortedProjects]);
 
   const filteredProjects = useMemo(
     () => filterProjects(searchMode === 'running' ? runningProjects : sortedProjects, debouncedSearchQuery),

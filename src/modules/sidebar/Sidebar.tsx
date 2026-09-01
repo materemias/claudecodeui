@@ -8,7 +8,7 @@ import { useSidebarController } from '@/modules/sidebar/hooks/useSidebarControll
 import { useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import { usePaletteOps } from '@/modules/command-palette';
 import { useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
-import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSession, SidebarProjectListProps } from '@/shared/types';
+import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSession, SidebarProjectListProps, TerminalRunningSessionMap } from '@/shared/types';
 import SidebarCollapsed from '@/modules/sidebar/SidebarCollapsed';
 import SidebarContent from '@/modules/sidebar/SidebarContent';
 import SidebarModals from '@/modules/sidebar/SidebarModals';
@@ -17,6 +17,7 @@ type SidebarProps = {
   projects: Project[];
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
+  terminalRunningSessions: TerminalRunningSessionMap;
   attentionSessionIds: ReadonlySet<string>;
   onProjectSelect: (project: Project) => void;
   onSessionSelect: (session: ProjectSession) => void;
@@ -46,6 +47,7 @@ function Sidebar({
   projects,
   selectedProject,
   selectedSession,
+  terminalRunningSessions,
   attentionSessionIds,
   onProjectSelect,
   onSessionSelect,
@@ -144,6 +146,7 @@ function Sidebar({
     selectedProject,
     selectedSession,
     activeSessions,
+    terminalRunningSessions,
     isLoading,
     isMobile,
     t,
@@ -201,6 +204,7 @@ function Sidebar({
     getProjectSessions,
     loadingMoreProjects,
     activeSessions,
+    terminalRunningSessions,
     attentionSessionIds,
     forceExpanded: searchMode === 'running',
     isProjectStarred,
