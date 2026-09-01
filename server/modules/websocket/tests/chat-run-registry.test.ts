@@ -203,6 +203,68 @@ test('listRunningRuns returns only currently running app sessions', async () => 
   });
 });
 
+test('recent completions survive refreshes until the exact four-hour boundary', { concurrency: false }, async () => {
+  await withIsolatedDatabase(() => {
+    const originalNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+
+    try {
+      sessionsDb.createAppSession('app-run-recent', 'claude', '/workspace/demo');
+      const run = chatRunRegistry.startRun({
+        appSessionId: 'app-run-recent',
+        provider: 'claude',
+        providerSessionId: null,
+        connection: new FakeConnection(),
+        userId: null,
+      });
+      assert.ok(run);
+
+      chatRunRegistry.completeRun('app-run-recent', { exitCode: 0 });
+      assert.deepEqual(chatRunRegistry.listRecentlyCompletedRuns(), [{
+        sessionId: 'app-run-recent',
+        provider: 'claude',
+        completedAt: 1_000_000,
+      }]);
+
+      now += (4 * 60 * 60 * 1000) - 1;
+      assert.equal(chatRunRegistry.listRecentlyCompletedRuns().length, 1);
+      assert.equal(chatRunRegistry.listRecentlyCompletedRuns()[0]?.completedAt, 1_000_000);
+
+      now += 1;
+      assert.deepEqual(chatRunRegistry.listRecentlyCompletedRuns(), []);
+      assert.deepEqual(chatRunRegistry.listRecentlyCompletedRuns(), []);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+});
+
+test('starting another Web UI run supersedes its retained completion', { concurrency: false }, async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-run-rerun', 'codex', '/workspace/demo');
+    const input = {
+      appSessionId: 'app-run-rerun',
+      provider: 'codex' as const,
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: null,
+    };
+    const firstRun = chatRunRegistry.startRun(input);
+    assert.ok(firstRun);
+    chatRunRegistry.completeRun('app-run-rerun', { exitCode: 0 });
+    assert.equal(chatRunRegistry.listRecentlyCompletedRuns().length, 1);
+
+    const rerun = chatRunRegistry.startRun(input);
+    assert.ok(rerun);
+    assert.deepEqual(chatRunRegistry.listRecentlyCompletedRuns(), []);
+    assert.deepEqual(
+      chatRunRegistry.listRunningRuns().map((session) => session.sessionId),
+      ['app-run-rerun'],
+    );
+  });
+});
+
 test('replayEvents returns only events after the requested seq', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-run-4', 'claude', '/workspace/demo');

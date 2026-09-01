@@ -2,7 +2,10 @@ import { memo } from 'react';
 
 import { QuickSettingsPanel } from '@/modules/quick-settings-panel';
 import ProjectEffects from '@/modules/project-workspace/controllers/ProjectEffects';
-import { useTerminalRunningSessions } from '@/shared/context/SessionProtectionContext';
+import {
+  useRecentWebSessions,
+  useTerminalRunningSessions,
+} from '@/shared/context/SessionProtectionContext';
 import type { ProjectWorkspaceShellProps } from '@/shared/types';
 import ProjectCommandPalette from '@/modules/project-workspace/ProjectCommandPalette';
 import ProjectMainRegion from '@/modules/project-workspace/ProjectMainRegion';
@@ -16,6 +19,7 @@ function ProjectWorkspaceShell({
   navigate,
 }: ProjectWorkspaceShellProps) {
   const terminalRunningSessions = useTerminalRunningSessions();
+  const recentWebSessions = useRecentWebSessions();
 
   return (
     <div
@@ -26,6 +30,7 @@ function ProjectWorkspaceShell({
       <ProjectSidebarRegion
         isMobile={isMobile}
         terminalRunningSessions={terminalRunningSessions}
+        recentWebSessions={recentWebSessions}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">

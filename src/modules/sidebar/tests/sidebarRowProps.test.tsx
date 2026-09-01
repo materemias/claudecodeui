@@ -4,7 +4,14 @@ import { render } from '@testing-library/react';
 import React from 'react';
 import { beforeEach, test, vi } from 'vitest';
 
-import type { ActiveSidebarRename, Project, SidebarProjectListProps, TerminalRunningSessionMap } from '@/shared/types';
+import type {
+  ActiveSidebarRename,
+  Project,
+  RecentWebSessionMap,
+  SidebarProjectListProps,
+  TerminalRunningSessionMap,
+} from '@/shared/types';
+import { buildRunningProjects } from '@/modules/sidebar/hooks/useSidebarController';
 
 /**
  * SidebarProjectItem and SidebarSessionItem are memoized because a websocket
@@ -243,4 +250,41 @@ test('the sorted session list is the same array until the project itself changes
     getAllSessions(PROJECT_A),
     'a replaced project must not read a stale entry',
   );
+});
+
+test('Running hydrates a retained session beyond the loaded page and dedupes a loaded canonical row', () => {
+  const project = makeProject(
+    'paged-project',
+    Array.from({ length: 20 }, (_, index) => `newer-${index}`),
+  );
+  const recentSessions: RecentWebSessionMap = new Map([
+    ['retained-session', {
+      sessionId: 'retained-session',
+      provider: 'codex',
+      source: 'recent',
+      projectId: 'paged-project',
+      sessionTitle: 'Retained title',
+      lastActivity: '2026-08-21T09:00:00.000Z',
+      completedAt: 1_000_000,
+      lastSeq: 0,
+    }],
+  ]);
+  const runningIds = new Set(['retained-session']);
+
+  const hydrated = buildRunningProjects([project], runningIds, recentSessions, 'name');
+  assert.deepEqual(hydrated[0]?.sessions?.map((session) => session.id), ['retained-session']);
+  assert.equal(hydrated[0]?.sessions?.[0]?.summary, 'Retained title');
+
+  const loadedCanonical = {
+    ...project,
+    sessions: [{
+      id: 'retained-session',
+      summary: 'Database title',
+      lastActivity: '2026-08-21T09:30:00.000Z',
+      __provider: 'codex' as const,
+    }],
+  };
+  const deduped = buildRunningProjects([loadedCanonical], runningIds, recentSessions, 'name');
+  assert.equal(deduped[0]?.sessions?.length, 1);
+  assert.equal(deduped[0]?.sessions?.[0]?.summary, 'Database title');
 });

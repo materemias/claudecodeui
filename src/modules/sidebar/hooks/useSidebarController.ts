@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, TerminalRunningSessionMap } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, RecentWebSessionMap, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, TerminalRunningSessionMap } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -46,6 +46,7 @@ type UseSidebarControllerArgs = {
   selectedSession: ProjectSession | null;
   activeSessions: ReadonlySet<string>;
   terminalRunningSessions: TerminalRunningSessionMap;
+  recentWebSessions: RecentWebSessionMap;
   isLoading: boolean;
   isMobile: boolean;
   t: TFunction;
@@ -61,12 +62,69 @@ type UseSidebarControllerArgs = {
   sidebarVisible: boolean;
 };
 
+/** Used by the sidebar controller and its pagination regression test to build the complete Running view. */
+export function buildRunningProjects(
+  projects: Project[],
+  runningSessionIds: ReadonlySet<string>,
+  recentWebSessions: RecentWebSessionMap,
+  projectSortOrder: ProjectSortOrder,
+): Project[] {
+  if (runningSessionIds.size === 0) {
+    return [];
+  }
+
+  const recentSessionsByProject = new Map<string, ProjectSession[]>();
+  for (const session of recentWebSessions.values()) {
+    const projectSessions = recentSessionsByProject.get(session.projectId) ?? [];
+    projectSessions.push({
+      id: session.sessionId,
+      summary: session.sessionTitle,
+      lastActivity: session.lastActivity ?? undefined,
+      provider: session.provider,
+      __provider: session.provider,
+      __projectId: session.projectId,
+    });
+    recentSessionsByProject.set(session.projectId, projectSessions);
+  }
+
+  const projectsWithRunningSessions = projects.reduce<Project[]>((acc, project) => {
+    const sessions = (project.sessions ?? []).filter(
+      (session) => runningSessionIds.has(String(session.id)),
+    );
+    const sessionIds = new Set(sessions.map((session) => String(session.id)));
+
+    for (const session of recentSessionsByProject.get(project.projectId) ?? []) {
+      if (!sessionIds.has(session.id)) {
+        sessions.push(session);
+      }
+    }
+
+    if (sessions.length === 0) {
+      return acc;
+    }
+
+    acc.push({
+      ...project,
+      sessions,
+      sessionMeta: {
+        ...project.sessionMeta,
+        total: sessions.length,
+        hasMore: false,
+      },
+    });
+    return acc;
+  }, []);
+
+  return sortProjects(projectsWithRunningSessions, projectSortOrder);
+}
+
 export function useSidebarController({
   projects,
   selectedProject,
   selectedSession: _selectedSession,
   activeSessions,
   terminalRunningSessions,
+  recentWebSessions,
   isLoading,
   isMobile,
   t,
@@ -126,8 +184,11 @@ export function useSidebarController({
     for (const sessionId of terminalRunningSessions.keys()) {
       sessionIds.add(sessionId);
     }
+    for (const sessionId of recentWebSessions.keys()) {
+      sessionIds.add(sessionId);
+    }
     return sessionIds;
-  }, [activeSessions, terminalRunningSessions]);
+  }, [activeSessions, recentWebSessions, terminalRunningSessions]);
   const runningSessionsCount = runningSessionIds.size;
 
   useEffect(() => {
@@ -655,31 +716,20 @@ export function useSidebarController({
     [projectSortOrder, projectsWithResolvedStarState],
   );
 
-  const runningProjects = useMemo(() => {
-    if (runningSessionIds.size === 0) {
-      return [];
-    }
-
-    return sortedProjects.reduce<Project[]>((acc, project) => {
-      const sessions = (project.sessions ?? []).filter((session) => runningSessionIds.has(String(session.id)));
-      const runningCount = sessions.length;
-
-      if (runningCount === 0) {
-        return acc;
-      }
-
-      acc.push({
-        ...project,
-        sessions,
-        sessionMeta: {
-          ...project.sessionMeta,
-          total: runningCount,
-          hasMore: false,
-        },
-      });
-      return acc;
-    }, []);
-  }, [runningSessionIds, sortedProjects]);
+  const runningProjects = useMemo(
+    () => buildRunningProjects(
+      projectsWithResolvedStarState,
+      runningSessionIds,
+      recentWebSessions,
+      projectSortOrder,
+    ),
+    [
+      projectSortOrder,
+      projectsWithResolvedStarState,
+      recentWebSessions,
+      runningSessionIds,
+    ],
+  );
 
   const filteredProjects = useMemo(
     () => filterProjects(searchMode === 'running' ? runningProjects : sortedProjects, debouncedSearchQuery),

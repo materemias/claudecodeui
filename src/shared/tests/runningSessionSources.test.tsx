@@ -6,6 +6,7 @@ import {
   SessionProtectionProvider,
   useProcessingSessions,
   useSessionProtectionActions,
+  useRecentWebSessions,
   useTerminalRunningSessions,
 } from '@/shared/context/SessionProtectionContext';
 import { test, vi } from 'vitest';
@@ -36,6 +37,33 @@ const runningSessions = [
     source: 'terminal',
     lastSeq: 0,
   },
+  {
+    sessionId: 'recent-session',
+    provider: 'cursor',
+    source: 'recent',
+    projectId: 'project-1',
+    sessionTitle: 'Recent session',
+    lastActivity: '2026-08-31T10:00:00.000Z',
+    completedAt: 200,
+    lastSeq: 0,
+  },
+  {
+    sessionId: 'shared-session',
+    provider: 'codex',
+    source: 'recent',
+    projectId: 'project-1',
+    sessionTitle: 'Superseded recent session',
+    lastActivity: null,
+    completedAt: 300,
+    lastSeq: 0,
+  },
+  {
+    sessionId: 'malformed-recent',
+    provider: 'claude',
+    source: 'recent',
+    completedAt: 400,
+    lastSeq: 0,
+  },
 ];
 
 vi.mock('@/shared/api', () => ({
@@ -47,7 +75,7 @@ vi.mock('@/shared/api', () => ({
   },
 }));
 
-test('keeps terminal source separate and lets processing win duplicate ids', async () => {
+test('keeps terminal and recent sources separate while processing wins duplicate ids', async () => {
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <SessionProtectionProvider>{children}</SessionProtectionProvider>
   );
@@ -56,6 +84,7 @@ test('keeps terminal source separate and lets processing win duplicate ids', asy
       processing: useProcessingSessions(),
       terminal: useTerminalRunningSessions(),
       actions: useSessionProtectionActions(),
+      recent: useRecentWebSessions(),
     }),
     { wrapper },
   );
@@ -71,6 +100,19 @@ test('keeps terminal source separate and lets processing win duplicate ids', asy
     lastSeq: 0,
   });
   assert.equal(result.current.terminal.has('malformed-terminal'), false);
+  assert.deepEqual(result.current.recent.get('recent-session'), {
+    sessionId: 'recent-session',
+    provider: 'cursor',
+    source: 'recent',
+    projectId: 'project-1',
+    sessionTitle: 'Recent session',
+    lastActivity: '2026-08-31T10:00:00.000Z',
+    completedAt: 200,
+    lastSeq: 0,
+  });
+  assert.equal(result.current.recent.has('shared-session'), false);
+  assert.equal(result.current.recent.has('malformed-recent'), false);
+  assert.equal(result.current.actions.isSessionProcessing('recent-session'), false);
   assert.equal(result.current.actions.isSessionProcessing('terminal-session'), false);
   assert.equal(result.current.actions.isSessionProcessing('shared-session'), true);
 });

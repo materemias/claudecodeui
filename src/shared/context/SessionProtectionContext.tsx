@@ -16,6 +16,8 @@ import type {
   LLMProvider,
   MarkSessionIdle,
   MarkSessionProcessing,
+  RecentWebSession,
+  RecentWebSessionMap,
   SessionActivitySnapshot,
   RunningSession,
   SessionActivityMap,
@@ -42,6 +44,7 @@ const SessionProtectionStateContext = createContext<SessionActivityMap | null>(n
 const SessionProtectionActionsContext = createContext<SessionProtectionActions | null>(null);
 const BusySessionIdsContext = createContext<ReadonlySet<string> | null>(null);
 const TerminalRunningSessionsContext = createContext<TerminalRunningSessionMap | null>(null);
+const RecentWebSessionsContext = createContext<RecentWebSessionMap | null>(null);
 
 /**
  * The set of session ids currently producing a response, with a stable identity
@@ -115,6 +118,30 @@ const parseRunningSession = (session: unknown): RunningSession | null => {
       : null;
   }
 
+  if (source === 'recent') {
+    const completedAt = parseStartedAt('completedAt' in session ? session.completedAt : null);
+    const projectId = 'projectId' in session ? session.projectId : null;
+    const sessionTitle = 'sessionTitle' in session ? session.sessionTitle : null;
+    const lastActivity = 'lastActivity' in session ? session.lastActivity : null;
+    return lastSeq === 0
+      && completedAt !== undefined
+      && typeof projectId === 'string'
+      && projectId.length > 0
+      && typeof sessionTitle === 'string'
+      && (typeof lastActivity === 'string' || lastActivity === null)
+      ? {
+          sessionId,
+          provider,
+          source,
+          projectId,
+          sessionTitle,
+          lastActivity,
+          completedAt,
+          lastSeq: 0,
+        }
+      : null;
+  }
+
   const startedAt = parseStartedAt('startedAt' in session ? session.startedAt : null);
   if (source !== 'processing' || startedAt === undefined || lastSeq < 0) {
     return null;
@@ -145,7 +172,30 @@ const terminalSessionMapsMatch = (
   return true;
 };
 
-/** Mounted by the project-workspace route; owns the processing state and status-only terminal membership returned by the running-session poll. */
+const recentSessionMapsMatch = (
+  left: RecentWebSessionMap,
+  right: RecentWebSessionMap,
+): boolean => {
+  if (left.size !== right.size) {
+    return false;
+  }
+
+  for (const [sessionId, session] of left) {
+    const other = right.get(sessionId);
+    if (
+      other?.provider !== session.provider
+      || other.completedAt !== session.completedAt
+      || other.projectId !== session.projectId
+      || other.sessionTitle !== session.sessionTitle
+      || other.lastActivity !== session.lastActivity
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
+
+/** Mounted by the project-workspace route; owns processing, terminal, and recent Web UI membership from the session poll. */
 export function SessionProtectionProvider({ children }: { children: ReactNode }) {
   const {
     processingSessions,
@@ -154,9 +204,12 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
     syncProcessingSessions,
     isSessionProcessing,
   } = useSessionProtection();
-  // Keeps external terminal membership from the running-session poll without
-  // marking those status-only sessions as processing or interruptible.
+  // External terminal rows and completed Web UI rows remain separate from
+  // processing state so neither becomes interruptible.
   const [terminalRunningSessions, setTerminalRunningSessions] = useState<Map<string, TerminalRunningSession>>(
+    new Map(),
+  );
+  const [recentWebSessions, setRecentWebSessions] = useState<Map<string, RecentWebSession>>(
     new Map(),
   );
 
@@ -178,16 +231,23 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
         }
 
         const existing = runningSessions.get(session.sessionId);
-        if (!existing || session.source === 'processing') {
+        if (
+          !existing
+          || session.source === 'processing'
+          || (session.source === 'terminal' && existing.source === 'recent')
+        ) {
           runningSessions.set(session.sessionId, session);
         }
       }
 
       const processingSnapshots: SessionActivitySnapshot[] = [];
       const terminalSessions = new Map<string, TerminalRunningSession>();
+      const recentSessions = new Map<string, RecentWebSession>();
       for (const session of runningSessions.values()) {
         if (session.source === 'terminal') {
           terminalSessions.set(session.sessionId, session);
+        } else if (session.source === 'recent') {
+          recentSessions.set(session.sessionId, session);
         } else {
           processingSnapshots.push({
             sessionId: session.sessionId,
@@ -199,6 +259,9 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
       syncProcessingSessions(processingSnapshots);
       setTerminalRunningSessions((previous) => (
         terminalSessionMapsMatch(previous, terminalSessions) ? previous : terminalSessions
+      ));
+      setRecentWebSessions((previous) => (
+        recentSessionMapsMatch(previous, recentSessions) ? previous : recentSessions
       ));
     } catch (error) {
       console.error('[SessionProtection] Failed to sync running sessions:', error);
@@ -236,13 +299,15 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
 
   return (
     <SessionProtectionActionsContext.Provider value={actions}>
-      <TerminalRunningSessionsContext.Provider value={terminalRunningSessions}>
-        <BusySessionIdsContext.Provider value={busySessionIds}>
-          <SessionProtectionStateContext.Provider value={processingSessions}>
-            {children}
-          </SessionProtectionStateContext.Provider>
-        </BusySessionIdsContext.Provider>
-      </TerminalRunningSessionsContext.Provider>
+      <RecentWebSessionsContext.Provider value={recentWebSessions}>
+        <TerminalRunningSessionsContext.Provider value={terminalRunningSessions}>
+          <BusySessionIdsContext.Provider value={busySessionIds}>
+            <SessionProtectionStateContext.Provider value={processingSessions}>
+              {children}
+            </SessionProtectionStateContext.Provider>
+          </BusySessionIdsContext.Provider>
+        </TerminalRunningSessionsContext.Provider>
+      </RecentWebSessionsContext.Provider>
     </SessionProtectionActionsContext.Provider>
   );
 }
@@ -264,6 +329,15 @@ export function useTerminalRunningSessions(): TerminalRunningSessionMap {
   const sessions = useContext(TerminalRunningSessionsContext);
   if (!sessions) {
     throw new Error('useTerminalRunningSessions must be used within SessionProtectionProvider');
+  }
+  return sessions;
+}
+
+/** Used by the project-workspace shell to keep completed Web UI runs discoverable without marking them active. */
+export function useRecentWebSessions(): RecentWebSessionMap {
+  const sessions = useContext(RecentWebSessionsContext);
+  if (!sessions) {
+    throw new Error('useRecentWebSessions must be used within SessionProtectionProvider');
   }
   return sessions;
 }

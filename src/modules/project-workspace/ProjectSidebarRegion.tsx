@@ -7,16 +7,22 @@ import { useTranslation } from 'react-i18next';
 
 import { useProjectSidebarState } from '@/modules/project-workspace/context/ProjectsStateContext';
 import { Sidebar } from '@/modules/sidebar';
-import type { ProjectWorkspaceShellProps, TerminalRunningSessionMap } from '@/shared/types';
+import type {
+  ProjectWorkspaceShellProps,
+  RecentWebSessionMap,
+  TerminalRunningSessionMap,
+} from '@/shared/types';
 
 type ProjectSidebarRegionProps = Pick<ProjectWorkspaceShellProps, 'isMobile'> & {
   terminalRunningSessions: TerminalRunningSessionMap;
+  recentWebSessions: RecentWebSessionMap;
 };
 
 /** Rendered by ProjectWorkspaceShell to host the sidebar module, docked on desktop and as a drawer on mobile. */
 function ProjectSidebarRegion({
   isMobile,
   terminalRunningSessions,
+  recentWebSessions,
 }: ProjectSidebarRegionProps) {
   const { t } = useTranslation('common');
   const { sidebarOpen, setSidebarOpen, sidebarSharedProps } = useProjectSidebarState();
@@ -38,6 +44,7 @@ function ProjectSidebarRegion({
         <Sidebar
           {...sidebarSharedProps}
           terminalRunningSessions={terminalRunningSessions}
+          recentWebSessions={recentWebSessions}
         />
       </div>
     );
@@ -65,6 +72,7 @@ function ProjectSidebarRegion({
         <Sidebar
           {...sidebarSharedProps}
           terminalRunningSessions={terminalRunningSessions}
+          recentWebSessions={recentWebSessions}
         />
       </div>
     </div>

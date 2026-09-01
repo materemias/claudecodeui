@@ -121,15 +121,36 @@ export const sessionsService = {
   },
 
   /**
-   * Returns CloudCLI provider runs and supported provider CLIs attached to a
-   * host terminal. Processing wins when both sources resolve to the same stable
-   * app session id, so callers see one row and keep Web UI interruption state.
+   * Returns CloudCLI runs completed within four hours, active CloudCLI runs,
+   * and supported provider CLIs attached to a host terminal. Active sources
+   * win when rows share a stable app session id, and processing wins over a
+   * terminal row so callers keep Web UI interruption state.
    */
   listRunningSessions(): RunningSession[] {
     const sessions = new Map<string, RunningSession>();
 
     for (const session of localAgentSessionsService.listRunningSessions()) {
       sessions.set(session.sessionId, session);
+    }
+    for (const session of chatRunRegistry.listRecentlyCompletedRuns()) {
+      if (sessions.has(session.sessionId)) {
+        continue;
+      }
+
+      const row = sessionsDb.getSessionById(session.sessionId);
+      const project = row?.project_path ? projectsDb.getProjectPath(row.project_path) : null;
+      if (!row || row.isArchived || !project || project.isArchived) {
+        continue;
+      }
+
+      sessions.set(session.sessionId, {
+        ...session,
+        source: 'recent',
+        projectId: project.project_id,
+        sessionTitle: row.custom_name?.trim() || row.session_id,
+        lastActivity: row.updated_at ?? row.created_at ?? null,
+        lastSeq: 0,
+      });
     }
     for (const session of chatRunRegistry.listRunningRuns()) {
       sessions.set(session.sessionId, { ...session, source: 'processing' });

@@ -191,10 +191,11 @@ export type SessionActivitySnapshot = {
 };
 
 /**
- * One currently running session parsed from the provider sessions API.
+ * One current or recently completed session parsed from the provider sessions API.
  *
  * Processing rows belong to CloudCLI and carry interruption timing. Terminal
- * rows describe an external CLI process and remain status-only.
+ * rows describe an external CLI process and remain status-only. Recent rows
+ * describe completed Web UI runs that stay discoverable for four hours.
  */
 export type RunningSession =
   | {
@@ -209,6 +210,16 @@ export type RunningSession =
       provider: LLMProvider;
       source: 'terminal';
       lastSeq: 0;
+    }
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'recent';
+      projectId: string;
+      sessionTitle: string;
+      lastActivity: string | null;
+      completedAt: number;
+      lastSeq: 0;
     };
 
 /** A status-only running session observed in an external terminal. */
@@ -216,6 +227,12 @@ export type TerminalRunningSession = Extract<RunningSession, { source: 'terminal
 
 /** External terminal sessions keyed by their stable app-facing session id. */
 export type TerminalRunningSessionMap = ReadonlyMap<string, TerminalRunningSession>;
+
+/** A completed Web UI run retained for sidebar discovery. */
+export type RecentWebSession = Extract<RunningSession, { source: 'recent' }>;
+
+/** Recently completed Web UI runs keyed by their canonical app-facing session id. */
+export type RecentWebSessionMap = ReadonlyMap<string, RecentWebSession>;
 
 // ---------------------------
 
