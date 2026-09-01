@@ -11,6 +11,7 @@ import {
   mergeOlderServerPage,
   planLatestPageBridge,
   resolveLatestPagePagination,
+  SESSION_MESSAGES_PAGE_SIZE,
 } from '@/modules/chat/utils/sessionMessagePagination';
 
 function message(
@@ -100,11 +101,11 @@ test('tool-result totals walk bounded bridge chunks until a contiguous anchor', 
   });
   assert.deepEqual(planLatestPageBridge(cached, latest, 100, 115, 1), {
     offset: 21,
-    limit: 20,
+    limit: SESSION_MESSAGES_PAGE_SIZE,
   });
   assert.deepEqual(planLatestPageBridge(cached, latest, 100, 115, 21), {
     offset: 41,
-    limit: 20,
+    limit: SESSION_MESSAGES_PAGE_SIZE,
   });
 
   const firstBridgeChunk = range(105, 105);
