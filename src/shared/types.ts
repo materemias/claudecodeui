@@ -94,6 +94,8 @@ export type ProjectSession = {
   provider?: LLMProvider;
   __provider?: LLMProvider;
   selection?: ProviderSessionSelectionSnapshot;
+  /** True only for non-interactive provider CLI sessions. Missing means false. */
+  isOneShot?: boolean;
   // Tags the session with the owning project's DB `projectId` so UI handlers
   // (session switching, sidebar focus, etc.) can match against selectedProject.
   __projectId?: string;
@@ -1335,12 +1337,13 @@ export type ArchivedSessionListItem = {
   updatedAt: string | null;
   lastActivity: string | null;
   isProjectArchived: boolean;
+  isOneShot?: boolean;
 };
 
 /** The subset of archived-session fields needed to render a recent-conversations row and reopen the session it points at. */
 export type RecentConversationListItem = Pick<
   ArchivedSessionListItem,
-  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity'
+  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity' | 'isOneShot'
 >;
 
 /**

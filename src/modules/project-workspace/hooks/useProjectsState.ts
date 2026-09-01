@@ -48,6 +48,7 @@ type SessionDetailsApiPayload = {
     summary?: string;
     createdAt?: string | null;
     lastActivity?: string | null;
+    isOneShot?: boolean;
     project?: {
       projectId?: string;
       path?: string;
@@ -134,11 +135,37 @@ const getProjectSessions = (project: Project): ProjectSession[] => {
 
 const countLoadedProjectSessions = (project: Project): number => getProjectSessions(project).length;
 
+const filterOneShotSessions = (project: Project): Project => {
+  const sessions = project.sessions ?? [];
+  const visibleSessions = sessions.filter((session) => session.isOneShot !== true);
+  if (visibleSessions.length === sessions.length) {
+    return project;
+  }
+
+  const hiddenLoadedCount = sessions.length - visibleSessions.length;
+  const visibleTotal = Math.max(
+    visibleSessions.length,
+    Number(project.sessionMeta?.total ?? sessions.length) - hiddenLoadedCount,
+  );
+  return {
+    ...project,
+    sessions: visibleSessions,
+    sessionMeta: {
+      ...project.sessionMeta,
+      total: visibleTotal,
+      hasMore: visibleSessions.length < visibleTotal,
+    },
+  };
+};
+
 const mergeSessionProviderLists = (baseSessions: ProjectSession[], additionalSessions: ProjectSession[]): ProjectSession[] => {
-  const merged = [...baseSessions];
-  const seenSessionIds = new Set(baseSessions.map((session) => String(session.id)));
+  const merged = baseSessions.filter((session) => session.isOneShot !== true);
+  const seenSessionIds = new Set(merged.map((session) => String(session.id)));
 
   for (const session of additionalSessions) {
+    if (session.isOneShot === true) {
+      continue;
+    }
     const sessionId = String(session.id);
     if (seenSessionIds.has(sessionId)) {
       continue;
@@ -242,6 +269,24 @@ const upsertSessionIntoProject = (project: Project, event: SessionUpsertedEvent)
     __provider: event.provider,
   };
   const existingIndex = sessions.findIndex((session) => aliasIds.has(String(session.id)));
+  if (event.session.isOneShot === true) {
+    const nextSessions = sessions.filter((session) => !aliasIds.has(String(session.id)));
+    const removedCount = sessions.length - nextSessions.length;
+    if (removedCount === 0) {
+      return project;
+    }
+
+    const total = Math.max(0, Number(project.sessionMeta?.total ?? sessions.length) - removedCount);
+    return {
+      ...project,
+      sessions: nextSessions,
+      sessionMeta: {
+        ...project.sessionMeta,
+        total,
+        hasMore: nextSessions.length < total,
+      },
+    };
+  }
 
   let nextSessions: ProjectSession[];
   let inserted = false;
@@ -486,7 +531,7 @@ export function useProjectsState({
         setIsLoadingProjects(true);
       }
       const response = await api.projects();
-      const projectData = (await response.json()) as Project[];
+      const projectData = ((await response.json()) as Project[]).map(filterOneShotSessions);
 
       if (projectsRequestIdRef.current !== requestId) {
         return;
@@ -978,6 +1023,7 @@ export function useProjectsState({
           typeof details.provider === 'string' && details.provider.trim()
             ? (details.provider as LLMProvider)
             : readSelectedProvider(),
+        isOneShot: details.isOneShot === true,
         __projectId: resolvedProjectId,
       };
 

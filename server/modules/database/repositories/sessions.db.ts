@@ -5,6 +5,12 @@ import type { ProviderSessionConfigReport } from '@/shared/types.js';
 
 type SessionNameSource = 'provisional' | 'provider' | 'user';
 
+type DiscoveredSessionOptions = {
+  isOneShot?: boolean;
+  /** Full rescans classify existing rows without restoring sessions the user archived. */
+  preserveArchived?: boolean;
+};
+
 export type SessionRow = {
   session_id: string;
   provider: string;
@@ -30,6 +36,8 @@ export type SessionRow = {
   effort_dirty: number;
   /** The app session this one was branched from; NULL unless it is a fork. */
   forked_from_session_id: string | null;
+  /** One for non-interactive provider CLI sessions, zero for interactive sessions. */
+  is_one_shot: number;
   isArchived: number;
   created_at: string;
   updated_at: string;
@@ -41,7 +49,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, name_source, provider_name, model, effort, live_model, live_effort, model_dirty, effort_dirty, forked_from_session_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, name_source, provider_name, model, effort, live_model, live_effort, model_dirty, effort_dirty, forked_from_session_id, is_one_shot, isArchived, created_at, updated_at';
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -102,8 +110,10 @@ export const sessionsDb = {
     customName?: string,
     createdAt?: string,
     updatedAt?: string,
-    jsonlPath?: string | null
+    jsonlPath?: string | null,
+    options: DiscoveredSessionOptions = {},
   ): string {
+    const { isOneShot = false, preserveArchived = false } = options;
     const db = getConnection();
     const createdAtValue = normalizeTimestamp(createdAt);
     const updatedAtValue = normalizeTimestamp(updatedAt);
@@ -128,7 +138,8 @@ export const sessionsDb = {
            updated_at = COALESCE(?, CURRENT_TIMESTAMP),
            project_path = ?,
            jsonl_path = ?,
-           isArchived = 0,
+           is_one_shot = ?,
+           isArchived = CASE WHEN ? THEN isArchived ELSE 0 END,
            custom_name = CASE
              WHEN session_id <> provider_session_id AND custom_name IS NOT NULL THEN custom_name
              ELSE COALESCE(?, custom_name)
@@ -139,6 +150,8 @@ export const sessionsDb = {
         updatedAtValue,
         normalizedProjectPath,
         jsonlPath ?? null,
+        isOneShot ? 1 : 0,
+        preserveArchived ? 1 : 0,
         customName ?? null,
         existing.session_id
       );
@@ -150,15 +163,16 @@ export const sessionsDb = {
     // keyed by the provider-native id for both columns. The ON CONFLICT path
     // covers legacy rows that predate the provider_session_id mapping.
     db.prepare(
-      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, name_source, project_path, jsonl_path, isArchived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'provider', ?, ?, 0, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, name_source, project_path, jsonl_path, is_one_shot, isArchived, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'provider', ?, ?, ?, 0, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
        ON CONFLICT(session_id) DO UPDATE SET
          provider = excluded.provider,
          provider_session_id = excluded.provider_session_id,
          updated_at = excluded.updated_at,
          project_path = excluded.project_path,
          jsonl_path = excluded.jsonl_path,
-         isArchived = 0,
+         is_one_shot = excluded.is_one_shot,
+         isArchived = CASE WHEN ? THEN sessions.isArchived ELSE 0 END,
          custom_name = CASE
            WHEN sessions.session_id <> sessions.provider_session_id AND sessions.custom_name IS NOT NULL
              THEN sessions.custom_name
@@ -171,8 +185,10 @@ export const sessionsDb = {
       customName ?? null,
       normalizedProjectPath,
       jsonlPath ?? null,
+      isOneShot ? 1 : 0,
       createdAtValue,
-      updatedAtValue
+      updatedAtValue,
+      preserveArchived ? 1 : 0,
     );
 
     return providerSessionId;
@@ -288,6 +304,7 @@ export const sessionsDb = {
                ELSE name_source
              END,
              custom_name = COALESCE(custom_name, ?),
+             is_one_shot = 0,
              updated_at = CURRENT_TIMESTAMP
            WHERE session_id = ?`
         ).run(
@@ -687,6 +704,7 @@ export const sessionsDb = {
     const visibilityClause = `
       sessions.isArchived = 0
       AND (projects.isArchived IS NULL OR projects.isArchived = 0)
+      AND sessions.is_one_shot = 0
     `;
     const rows = db
       .prepare(
@@ -725,6 +743,7 @@ export const sessionsDb = {
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
          WHERE isArchived = 1
+           AND is_one_shot = 0
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
       )
       .all() as SessionRow[];
@@ -774,6 +793,7 @@ export const sessionsDb = {
          FROM sessions
          WHERE project_path = ?
            AND isArchived = 0
+           AND is_one_shot = 0
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
          LIMIT ? OFFSET ?`
       )
@@ -790,7 +810,8 @@ export const sessionsDb = {
         `SELECT COUNT(*) AS count
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0`
+           AND isArchived = 0
+           AND is_one_shot = 0`
       )
       .get(normalizedProjectPath) as { count: number } | undefined;
 

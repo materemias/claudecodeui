@@ -289,6 +289,7 @@ export type SessionUpsertedEvent = {
     summary: string;
     messageCount: number;
     lastActivity: string;
+    isOneShot: boolean;
     selection: ProviderSessionSelectionSnapshot;
   };
   project: SessionUpsertedProject | null;

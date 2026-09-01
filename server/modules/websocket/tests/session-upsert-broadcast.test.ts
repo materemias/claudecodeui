@@ -59,6 +59,28 @@ test('an upsert always carries the provider session id', async () => {
   });
 });
 
+test('an upsert carries one-shot classification for client-side removal', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createSession(
+      'print-session',
+      'claude',
+      '/workspace/demo',
+      'Print session',
+      undefined,
+      undefined,
+      null,
+      { isOneShot: true },
+    );
+
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+    await broadcastSessionUpserted('print-session');
+
+    const session = connection.frames[0]?.session as { isOneShot?: boolean } | undefined;
+    assert.equal(session?.isOneShot, true);
+  });
+});
+
 test('the watcher path resolves a provider-native id to the same canonical event', async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createAppSession('app-2', 'opencode', '/workspace/demo');

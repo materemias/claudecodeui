@@ -32,6 +32,16 @@ const UNTITLED = 'Untitled omp Session';
 const MAIN_MODEL_ROLES = new Set(['default', 'temporary', 'fallback']);
 const REPLACED_MODEL_STOP_REASON = 'error';
 
+const OMP_PARENT_SESSION_DIRECTORY_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_(?:[0-9a-f]{16}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
+
+/** Background agents live somewhere below a parent session directory. */
+function isBackgroundSessionFile(sessionsRoot: string, filePath: string): boolean {
+  const pathParts = path.relative(sessionsRoot, filePath).split(path.sep);
+  return pathParts.length >= 3
+    && OMP_PARENT_SESSION_DIRECTORY_PATTERN.test(pathParts[1] ?? '');
+}
+
 /**
  * Maps `<ts>_<id>/__advisor.<name>.jsonl` back to the `<ts>_<id>.jsonl` that
  * owns it, deriving the owner the same way the history reader derives the
@@ -270,14 +280,14 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
         continue;
       }
       synchronizedOwners.add(owner);
-      if (await this.synchronizeFile(owner)) {
+      if (await this.synchronizeFile(owner, since === undefined)) {
         processed += 1;
       }
     }
     return processed;
   }
 
-  async synchronizeFile(filePath: string): Promise<string | null> {
+  async synchronizeFile(filePath: string, preserveArchived = false): Promise<string | null> {
     if (!filePath.endsWith('.jsonl')) {
       return null;
     }
@@ -291,7 +301,9 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
       // `session_upserted`, and an open chat never learned that the history it
       // was showing had changed.
       const parentTranscript = resolveOmpSidecarParent(filePath);
-      return parentTranscript ? this.synchronizeFile(parentTranscript) : null;
+      return parentTranscript
+        ? this.synchronizeFile(parentTranscript, preserveArchived)
+        : null;
     }
 
     const parsed = await this.parseSessionHeader(filePath);
@@ -353,6 +365,10 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
       timestamps.createdAt,
       timestamps.updatedAt,
       filePath,
+      {
+        isOneShot: isBackgroundSessionFile(this.sessionsRoot, filePath),
+        preserveArchived,
+      },
     );
 
     if (parsed.hasProviderTitle && currentTitle) {

@@ -200,10 +200,28 @@ export function useSidebarController({
 
       const archivedProjectsPayload = (await archivedProjectsResponse.json()) as ArchivedProjectsApiPayload;
       const archivedSessionsPayload = (await archivedSessionsResponse.json()) as ArchivedSessionsApiPayload;
-      const nextProjects = Array.isArray(archivedProjectsPayload.data?.projects) ? archivedProjectsPayload.data.projects : [];
+      const nextProjects = (Array.isArray(archivedProjectsPayload.data?.projects)
+        ? archivedProjectsPayload.data.projects
+        : []).map((project) => {
+          const sessions = (project.sessions ?? []).filter((session) => session.isOneShot !== true);
+          if (sessions.length === (project.sessions ?? []).length) {
+            return project;
+          }
+          return {
+            ...project,
+            sessions,
+            sessionMeta: {
+              ...project.sessionMeta,
+              total: sessions.length,
+              hasMore: false,
+            },
+          };
+        });
       const archivedProjectIds = new Set(nextProjects.map((project) => project.projectId));
       const nextStandaloneSessions = Array.isArray(archivedSessionsPayload.data?.sessions)
-        ? archivedSessionsPayload.data.sessions.filter((session) => !session.projectId || !archivedProjectIds.has(session.projectId))
+        ? archivedSessionsPayload.data.sessions.filter((session) =>
+            session.isOneShot !== true
+            && (!session.projectId || !archivedProjectIds.has(session.projectId)))
         : [];
 
       setArchivedProjects(nextProjects);
@@ -232,7 +250,7 @@ export function useSidebarController({
 
       const payload = (await response.json()) as RecentConversationsApiPayload;
       const conversations = Array.isArray(payload.data?.conversations)
-        ? payload.data.conversations
+        ? payload.data.conversations.filter((conversation) => conversation.isOneShot !== true)
         : [];
 
       if (requestSequence !== recentConversationsSeqRef.current) {
@@ -653,7 +671,8 @@ export function useSidebarController({
     }
 
     return sortedProjects.reduce<Project[]>((acc, project) => {
-      const sessions = (project.sessions ?? []).filter((session) => activeSessionIds.has(String(session.id)));
+      const sessions = (project.sessions ?? []).filter((session) =>
+        session.isOneShot !== true && activeSessionIds.has(String(session.id)));
       const runningCount = sessions.length;
 
       if (runningCount === 0) {

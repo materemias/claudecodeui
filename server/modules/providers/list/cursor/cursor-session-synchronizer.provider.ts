@@ -63,7 +63,8 @@ export class CursorSessionSynchronizer implements IProviderSessionSynchronizer {
         parsed.sessionName,
         timestamps.createdAt,
         timestamps.updatedAt,
-        filePath
+        filePath,
+        { preserveArchived: since === undefined },
       );
       processed += 1;
     }

@@ -16,6 +16,7 @@ type ParsedSession = {
   sessionId: string;
   projectPath: string;
   sessionName?: string;
+  isOneShot: boolean;
 };
 
 /**
@@ -60,7 +61,8 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
         parsed.sessionName,
         timestamps.createdAt,
         timestamps.updatedAt,
-        filePath
+        filePath,
+        { isOneShot: parsed.isOneShot, preserveArchived: since === undefined },
       );
       processed += 1;
     }
@@ -90,7 +92,8 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
       parsed.sessionName,
       timestamps.createdAt,
       timestamps.updatedAt,
-      filePath
+      filePath,
+      { isOneShot: parsed.isOneShot },
     );
   }
 
@@ -115,6 +118,7 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
         sessionId,
         projectPath,
         isSubagent: payload ? this.isSubagentSessionMeta(payload) : false,
+        isOneShot: payload?.source === 'exec',
       };
     });
 
@@ -135,21 +139,24 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
     // ids must be resolved through the provider-id mapping first.
     const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
       ?? sessionsDb.getSessionById(parsed.sessionId);
+    const classifiedSession = existingSession && existingSession.session_id !== parsed.sessionId
+      ? { ...parsed, isOneShot: false }
+      : parsed;
     const existingSessionName = existingSession?.custom_name;
     if (existingSessionName && existingSessionName !== 'Untitled Codex Session') {
       return {
-        ...parsed,
+        ...classifiedSession,
         sessionName: normalizeSessionName(existingSessionName, 'Untitled Codex Session'),
       };
     }
 
-    let sessionName = nameMap.get(parsed.sessionId);
+    let sessionName = nameMap.get(classifiedSession.sessionId);
     if (!sessionName) {
       sessionName = await this.extractLastAgentMessageFromEnd(filePath);
     }
 
     return {
-      ...parsed,
+      ...classifiedSession,
       sessionName: normalizeSessionName(sessionName, 'Untitled Codex Session'),
     };
   }
