@@ -56,6 +56,7 @@ function Harness({ initiallyNearViewport }: { initiallyNearViewport: boolean }) 
       <LazyMessageRow
         lazyRows={lazyRows}
         timestamp="2026-01-01T00:00:00.000Z"
+        isUserTurn
         initiallyNearViewport={initiallyNearViewport}
       >
         <span data-testid="row-content">expensive content</span>
@@ -78,6 +79,7 @@ describe('LazyMessageRow', () => {
     expect(queryByTestId('row-content')).toBeNull();
     const wrapper = container.querySelector('[data-message-timestamp="2026-01-01T00:00:00.000Z"]');
     expect(wrapper).not.toBeNull();
+    expect(wrapper?.hasAttribute('data-user-turn')).toBe(true);
     expect((wrapper as HTMLElement).style.height).not.toBe('');
   });
 

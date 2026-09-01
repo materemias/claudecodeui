@@ -281,6 +281,7 @@ function ChatMessagesPane({
                     key={`tool-group-${getMessageKey(item.messages[0])}`}
                     lazyRows={lazyRows}
                     timestamp={item.timestamp}
+                    isUserTurn={false}
                     initiallyNearViewport={initiallyNearViewport}
                   >
                     <ToolGroupContainer
@@ -308,6 +309,7 @@ function ChatMessagesPane({
                   key={getMessageKey(item)}
                   lazyRows={lazyRows}
                   timestamp={item.timestamp}
+                  isUserTurn={item.type === 'user'}
                   initiallyNearViewport={initiallyNearViewport}
                 >
                   <MessageComponent

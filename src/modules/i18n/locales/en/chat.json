@@ -122,6 +122,8 @@
     "showAllCommands": "Show all commands",
     "clearInput": "Clear input",
     "scrollToBottom": "Scroll to bottom",
+    "previousUserTurn": "Previous user turn",
+    "nextUserTurn": "Next user turn",
     "queue": {
       "sendNext": "Queue next message",
       "update": "Update queued message",

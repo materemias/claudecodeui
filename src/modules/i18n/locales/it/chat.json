@@ -110,7 +110,9 @@
     "clickToChangeMode": "Clicca per cambiare modalità permessi (o premi Tab nell'input)",
     "showAllCommands": "Mostra tutti i comandi",
     "clearInput": "Cancella input",
-    "scrollToBottom": "Scorri in basso"
+    "scrollToBottom": "Scorri in basso",
+    "previousUserTurn": "Turno utente precedente",
+    "nextUserTurn": "Turno utente successivo"
   },
   "providerSelection": {
     "title": "Scegli il tuo assistente AI",
