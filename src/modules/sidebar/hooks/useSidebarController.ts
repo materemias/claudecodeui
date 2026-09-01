@@ -51,6 +51,7 @@ type UseSidebarControllerArgs = {
   onRefresh: () => Promise<void> | void;
   onProjectSelect: (project: Project) => void;
   onSessionSelect: (session: ProjectSession) => void;
+  onNewSession: (project: Project) => void;
   onSessionDelete?: (sessionId: string) => void;
   onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
   // `projectId` is the DB-assigned identifier; callbacks use that post-migration.
@@ -71,6 +72,7 @@ export function useSidebarController({
   onRefresh,
   onProjectSelect,
   onSessionSelect,
+  onNewSession,
   onSessionDelete,
   onLoadMoreSessions,
   onProjectDelete,
@@ -867,6 +869,13 @@ export function useSidebarController({
     },
     [onProjectSelect, setCurrentProject],
   );
+  const handleNewSession = useCallback(
+    (project: Project) => {
+      setCurrentProject(project);
+      onNewSession(project);
+    },
+    [onNewSession, setCurrentProject],
+  );
 
   const openArchivedSession = useCallback((session: ArchivedSessionListItem) => {
     const activeProject = session.projectId
@@ -1063,6 +1072,7 @@ export function useSidebarController({
     requestProjectDelete,
     confirmDeleteProject,
     handleProjectSelect,
+    handleNewSession,
     openArchivedSession,
     restoreArchivedProject,
     restoreArchivedSession,

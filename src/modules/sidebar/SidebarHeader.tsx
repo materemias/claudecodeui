@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Activity, Archive, Folder, FolderPlus, MessageSquare, Plus, RefreshCw, Search, X, PanelLeftClose } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
@@ -78,6 +79,16 @@ export default function SidebarHeader({
         ? t('search.runningPlaceholder', 'Search running sessions...')
         : t('projects.searchPlaceholder');
   const runningBadgeText = runningSessionsCount > 99 ? '99+' : String(runningSessionsCount);
+  const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
+  const isMobileSearchVisible = isMobileSearchOpen || searchFilter.length > 0;
+
+  const handleMobileSearchToggle = () => {
+    if (isMobileSearchVisible) {
+      onClearSearchFilter();
+    }
+
+    setIsMobileSearchOpen(!isMobileSearchVisible);
+  };
 
   return (
     <div className="flex-shrink-0">
@@ -269,6 +280,21 @@ export default function SidebarHeader({
             >
               <RefreshCw className={`h-4 w-4 text-muted-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
             </button>
+            {showSearchTools && (
+              <button
+                type="button"
+                className={cn(
+                  'flex h-8 w-8 items-center justify-center rounded-lg bg-muted/50 transition-all active:scale-95',
+                  isMobileSearchVisible && 'bg-primary/10 text-primary',
+                )}
+                onClick={handleMobileSearchToggle}
+                aria-label={t('tooltips.toggleSearch', 'Toggle search')}
+                aria-expanded={isMobileSearchVisible}
+                title={t('tooltips.toggleSearch', 'Toggle search')}
+              >
+                <Search className="h-4 w-4" />
+              </button>
+            )}
             <button
               className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/90 text-primary-foreground transition-all active:scale-95"
               onClick={onCreateProject}
@@ -349,25 +375,28 @@ export default function SidebarHeader({
                 </button>
               </Tooltip>
             </div>
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/50" />
-              <Input
-                type="text"
-                placeholder={searchPlaceholder}
-                value={searchFilter}
-                onChange={(event) => onSearchFilterChange(event.target.value)}
-                className="nav-search-input h-10 rounded-xl border-0 pl-10 pr-9 text-sm transition-all duration-200 placeholder:text-muted-foreground/40 focus-visible:ring-0 focus-visible:ring-offset-0"
-              />
-              {searchFilter && (
-                <button
-                  onClick={onClearSearchFilter}
-                  aria-label={t('tooltips.clearSearch')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 hover:bg-accent"
-                >
-                  <X className="h-3.5 w-3.5 text-muted-foreground" />
-                </button>
-              )}
-            </div>
+            {isMobileSearchVisible && (
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/50" />
+                <Input
+                  type="text"
+                  autoFocus
+                  placeholder={searchPlaceholder}
+                  value={searchFilter}
+                  onChange={(event) => onSearchFilterChange(event.target.value)}
+                  className="nav-search-input h-10 rounded-xl border-0 pl-10 pr-9 text-sm transition-all duration-200 placeholder:text-muted-foreground/40 focus-visible:ring-0 focus-visible:ring-offset-0"
+                />
+                {searchFilter && (
+                  <button
+                    onClick={onClearSearchFilter}
+                    aria-label={t('tooltips.clearSearch')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 hover:bg-accent"
+                  >
+                    <X className="h-3.5 w-3.5 text-muted-foreground" />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
