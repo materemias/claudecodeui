@@ -309,6 +309,8 @@ export type ChatMessage = {
   isLocalCommand?: boolean;
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
+  /** A client-observed turn ended without a terminal event. */
+  isTurnInterrupted?: boolean;
   isSubagentContainer?: boolean;
   /** The agent this row spawned, when it spawned one. Its presence is what makes a row a subagent container. */
   subagent?: SubagentInfo;
@@ -491,7 +493,7 @@ export type NormalizedMessage = {
   rowid?: number;
 };
 
-/** Discriminator on NormalizedMessage naming which kind of transcript event it carries — plain text, tool use or result, thinking, stream delta or end, error, completion, status, permission request/resolution/cancellation, session creation, interactive prompt, or task notification. */
+/** Discriminator on NormalizedMessage naming which kind of transcript event it carries. */
 type MessageKind =
   | 'text'
   | 'tool_use'
@@ -507,6 +509,7 @@ type MessageKind =
   | 'permission_cancelled'
   | 'session_created'
   | 'history_truncated'
+  | 'turn_interrupted'
   | 'task_notification';
 
 // ---------------------------

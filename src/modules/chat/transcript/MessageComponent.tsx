@@ -161,6 +161,18 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
             </div>
           )}
         </div>
+      ) : message.isTurnInterrupted ? (
+        <div className="w-full">
+          <div className="flex items-center gap-2 py-0.5">
+            <span
+              aria-hidden="true"
+              className="inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-gray-400 dark:bg-gray-500"
+            />
+            <span className="text-xs italic text-gray-500 dark:text-gray-400">
+              {t('session.messages.turnInterrupted')}
+            </span>
+          </div>
+        </div>
       ) : message.isTaskNotification ? (
         /* Compact task notification on the left */
         <div className="w-full">

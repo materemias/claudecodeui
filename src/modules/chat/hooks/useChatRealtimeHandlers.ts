@@ -20,13 +20,22 @@ type BufferedRow = {
   id: string;
   text: string;
   provider: LLMProvider;
+  timestamp: string;
+  seq: number | null;
   dirty: boolean;
   lastFrameAt: number;
 };
 
 type SessionBuffers = {
   get: (sessionId: string) => BufferedRow | undefined;
-  append: (sessionId: string, text: string, provider: LLMProvider, mintId: () => string) => void;
+  append: (
+    sessionId: string,
+    text: string,
+    provider: LLMProvider,
+    timestamp: string,
+    seq: number | null,
+    mintId: () => string,
+  ) => void;
   close: (sessionId: string) => BufferedRow | undefined;
   drop: (sessionId: string) => BufferedRow | undefined;
   stopTimer: () => void;
@@ -50,13 +59,23 @@ function createSessionBuffers(write: (sessionId: string, row: BufferedRow) => vo
 
   return {
     get: sessionId => rows.get(sessionId),
-    append(sessionId, text, provider, mintId) {
+    append(sessionId, text, provider, timestamp, seq, mintId) {
       let row = rows.get(sessionId);
       if (!row) {
-        row = { id: mintId(), text: '', provider, dirty: false, lastFrameAt: 0 };
+        row = {
+          id: mintId(),
+          text: '',
+          provider,
+          timestamp,
+          seq,
+          dirty: false,
+          lastFrameAt: 0,
+        };
         rows.set(sessionId, row);
       }
       row.text += text;
+      row.timestamp = timestamp;
+      row.seq = seq;
       row.dirty = true;
       row.lastFrameAt = Date.now();
       if (timer === null) {
@@ -157,7 +176,13 @@ export function useChatRealtimeHandlers({
   const thinkingBuffersRef = useRef<SessionBuffers | null>(null);
   if (!thinkingBuffersRef.current) {
     thinkingBuffersRef.current = createSessionBuffers((sessionId, row) => {
-      sessionStoreRef.current.updateThinking(sessionId, row.id, row.text, row.provider);
+      sessionStoreRef.current.updateThinking(
+        sessionId,
+        row.id,
+        row.text,
+        row.provider,
+        row.timestamp,
+      );
     });
   }
   const thinkingBuffers = thinkingBuffersRef.current;
@@ -165,7 +190,12 @@ export function useChatRealtimeHandlers({
   const streamBuffersRef = useRef<SessionBuffers | null>(null);
   if (!streamBuffersRef.current) {
     streamBuffersRef.current = createSessionBuffers((sessionId, row) => {
-      sessionStoreRef.current.updateStreaming(sessionId, row.text, row.provider);
+      sessionStoreRef.current.updateStreaming(
+        sessionId,
+        row.text,
+        row.provider,
+        row.timestamp,
+      );
     });
   }
   const streamBuffers = streamBuffersRef.current;
@@ -232,15 +262,75 @@ export function useChatRealtimeHandlers({
             });
             const subscribedAt = statusCheckSentAtRef.current.get(sid);
             if (subscribedAt !== undefined) {
-              const orphanedText = streamBuffers.get(sid);
-              if (orphanedText && orphanedText.lastFrameAt < subscribedAt) {
-                streamBuffers.drop(sid);
-                sessionStoreRef.current.discardRealtimeMessage(sid, orphanedText.id);
-              }
+              const bufferedText = streamBuffers.get(sid);
+              const orphanedText = bufferedText && bufferedText.lastFrameAt < subscribedAt
+                ? bufferedText
+                : undefined;
+              const bufferedThinking = thinkingBuffers.get(sid);
+              const orphanedThinking = bufferedThinking && bufferedThinking.lastFrameAt < subscribedAt
+                ? bufferedThinking
+                : undefined;
 
-              const orphanedThinking = thinkingBuffers.get(sid);
-              if (orphanedThinking && orphanedThinking.lastFrameAt < subscribedAt) {
-                thinkingBuffers.close(sid);
+              const initialNoticeSource = orphanedText ?? orphanedThinking;
+              if (initialNoticeSource) {
+                let noticeSource = initialNoticeSource;
+                if (orphanedThinking) {
+                  const sourceTime = Date.parse(noticeSource.timestamp);
+                  const thinkingTime = Date.parse(orphanedThinking.timestamp);
+                  const sourceSeq = noticeSource.seq ?? -1;
+                  const thinkingSeq = orphanedThinking.seq ?? -1;
+                  if (
+                    thinkingTime > sourceTime
+                    || (
+                      thinkingTime === sourceTime
+                      && (
+                        thinkingSeq > sourceSeq
+                        || (
+                          thinkingSeq === sourceSeq
+                          && orphanedThinking.lastFrameAt >= noticeSource.lastFrameAt
+                        )
+                      )
+                    )
+                  ) {
+                    noticeSource = orphanedThinking;
+                  }
+                }
+
+                const sourceWasPersisted = sessionStoreRef.current.hasPersistedTurnCompletion(
+                  sid,
+                  {
+                    id: noticeSource.id,
+                    sessionId: sid,
+                    timestamp: noticeSource.timestamp,
+                    provider: noticeSource.provider,
+                    kind: noticeSource === orphanedThinking ? 'thinking' : 'stream_delta',
+                    content: noticeSource.text,
+                  },
+                );
+
+                if (orphanedText) {
+                  streamBuffers.drop(sid);
+                  sessionStoreRef.current.discardRealtimeMessage(sid, orphanedText.id);
+                }
+                if (orphanedThinking) {
+                  thinkingBuffers.close(sid);
+                }
+
+                // A retained completed run reports a newer lastSeq. After that
+                // run is evicted, refreshed history carries the completed
+                // assistant row at or after the newest partial frame.
+                const knownSeq = lastSeqRef.current.get(sid) ?? 0;
+                const hasUnseenTerminal = typeof msg.lastSeq === 'number'
+                  && msg.lastSeq > knownSeq;
+                if (!hasUnseenTerminal && !sourceWasPersisted) {
+                  sessionStoreRef.current.appendRealtime(sid, {
+                    id: `turn_interrupted_${sid}_${noticeSource.id}`,
+                    sessionId: sid,
+                    timestamp: noticeSource.timestamp,
+                    provider: noticeSource.provider,
+                    kind: 'turn_interrupted',
+                  });
+                }
               }
             }
           }
@@ -298,13 +388,23 @@ export function useChatRealtimeHandlers({
       const eventProvider = typeof msg.provider === 'string'
         ? msg.provider as LLMProvider
         : null;
+      const candidateEventTimestamp = typeof msg.timestamp === 'string'
+        ? msg.timestamp
+        : null;
+      const eventTimestamp = candidateEventTimestamp
+        && Number.isFinite(Date.parse(candidateEventTimestamp))
+        ? candidateEventTimestamp
+        : new Date().toISOString();
+      const eventSeq = typeof msg.seq === 'number' && Number.isFinite(msg.seq)
+        ? msg.seq
+        : null;
 
       // OMP sends reasoning as small chunks. Other providers already send
       // complete thinking blocks, so they stay on the ordinary append path.
       if (msg.kind === 'thinking' && eventProvider === 'omp') {
         const text = typeof msg.content === 'string' ? msg.content : '';
         if (!text || !eventSessionId) return;
-        thinkingBuffers.append(eventSessionId, text, eventProvider, () => {
+        thinkingBuffers.append(eventSessionId, text, eventProvider, eventTimestamp, eventSeq, () => {
           thinkingBlockSeqRef.current += 1;
           return `__thinking_${eventSessionId}_${thinkingBlockSeqRef.current}`;
         });
@@ -324,6 +424,8 @@ export function useChatRealtimeHandlers({
           eventSessionId,
           text,
           eventProvider,
+          eventTimestamp,
+          eventSeq,
           () => streamingMessageId(eventSessionId),
         );
         return;

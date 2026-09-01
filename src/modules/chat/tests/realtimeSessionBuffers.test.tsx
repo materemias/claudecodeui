@@ -35,6 +35,7 @@ function renderBuffers(initialSessionId = 'viewed') {
     };
   };
   const statusCheckSentAtRef = { current: new Map<string, number>() };
+  const lastSeqRef = { current: new Map<string, number>() };
 
   const view = renderHook(
     ({ sessionId }: { sessionId: string }) => {
@@ -48,7 +49,7 @@ function renderBuffers(initialSessionId = 'viewed') {
         setTokenBudget: () => {},
         pendingPermissionRequests: [],
         setPendingPermissionRequests: () => {},
-        lastSeqRef: { current: new Map() },
+        lastSeqRef,
         statusCheckSentAtRef,
         requestLatestMessages: async () => {},
         sessionStore: store,
@@ -128,34 +129,304 @@ describe('session-keyed realtime buffers', () => {
     assert.equal(result.current.getMessages('B')[0]?.content, 'reason resume');
   });
 
-  it('drops an idle orphan by session without a later timer restoring it', () => {
+  it('marks each lost Claude or OMP turn once at its transcript boundary', () => {
     const { result, dispatch, statusCheckSentAtRef } = renderBuffers();
 
     vi.setSystemTime(new Date('2026-09-01T10:00:00.000Z'));
-    dispatch(event('stream_delta', 'A', 'claude', 'orphan'));
-    dispatch(event('stream_delta', 'B', 'omp', 'live'));
+    dispatch(event('stream_delta', 'A', 'claude', 'orphan', {
+      seq: 1,
+      timestamp: '2026-09-01T10:00:00.000Z',
+    }));
+    dispatch(event('thinking', 'B', 'omp', 'reasoning only', {
+      seq: 1,
+      timestamp: '2026-09-01T10:00:00.000Z',
+    }));
+    dispatch(event('stream_delta', 'C', 'omp', 'text', {
+      seq: 1,
+      timestamp: '2026-09-01T10:00:00.000Z',
+    }));
+    dispatch(event('thinking', 'C', 'omp', 'reasoning too', {
+      seq: 2,
+      timestamp: '2026-09-01T10:00:00.000Z',
+    }));
 
-    statusCheckSentAtRef.current.set('A', Date.now() + 1);
+    for (const sessionId of ['A', 'B', 'C']) {
+      statusCheckSentAtRef.current.set(sessionId, Date.now() + 1);
+      dispatch({
+        kind: 'chat_subscribed',
+        sessionId,
+        isProcessing: false,
+        lastSeq: 0,
+      } as unknown as ServerEvent);
+    }
+
+    act(() => vi.advanceTimersByTime(100));
+
+    assert.deepEqual(
+      result.current.getMessages('A').map(message => [message.kind, message.provider]),
+      [['turn_interrupted', 'claude']],
+    );
+    for (const sessionId of ['B', 'C']) {
+      const messages = result.current.getMessages(sessionId);
+      assert.equal(messages.filter(message => message.kind === 'turn_interrupted').length, 1);
+      assert.equal(messages.find(message => message.kind === 'turn_interrupted')?.provider, 'omp');
+      assert.equal(messages.some(message => message.kind === 'thinking'), true);
+    }
+
+    // A replayed idle acknowledgement has no buffer left to retire.
     dispatch({
       kind: 'chat_subscribed',
       sessionId: 'A',
       isProcessing: false,
+      lastSeq: 0,
     } as unknown as ServerEvent);
+    dispatch(event('text', 'A', 'claude', 'send again', {
+      role: 'user',
+      timestamp: '2026-09-01T10:00:01.000Z',
+    }));
 
-    act(() => vi.advanceTimersByTime(100));
+    assert.deepEqual(
+      result.current.getMessages('A').map(message => message.kind),
+      ['turn_interrupted', 'text'],
+    );
+  });
 
-    assert.deepEqual(result.current.getMessages('A'), []);
-    assert.equal(result.current.getMessages('B')[0]?.content, 'live');
+  it('does not use an earlier same-prefix assistant segment as completion evidence', async () => {
+    const { result, dispatch, statusCheckSentAtRef } = renderBuffers();
+    vi.setSystemTime(new Date('2026-09-01T10:01:00.000Z'));
 
+    dispatch(event('stream_delta', 'segmented', 'claude', 'same', {
+      seq: 4,
+      timestamp: '2026-09-01T10:01:00.000Z',
+    }));
+    const history = [
+      {
+        id: 'segmented-user',
+        sessionId: 'segmented',
+        provider: 'claude',
+        kind: 'text',
+        role: 'user',
+        content: 'question',
+        timestamp: '2026-09-01T09:59:00.000Z',
+      },
+      {
+        id: 'earlier-answer',
+        sessionId: 'segmented',
+        provider: 'claude',
+        kind: 'text',
+        role: 'assistant',
+        content: 'same prefix, earlier segment',
+        timestamp: '2026-09-01T10:00:00.000Z',
+      },
+      {
+        id: 'tool-boundary',
+        sessionId: 'segmented',
+        provider: 'claude',
+        kind: 'tool_use',
+        toolId: 'call-1',
+        toolName: 'Read',
+        timestamp: '2026-09-01T10:00:30.000Z',
+      },
+    ] as NormalizedMessage[];
+    sessionMessages.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { messages: history, total: history.length, hasMore: false },
+      }),
+    });
+    await act(async () => {
+      await result.current.fetchFromServer('segmented');
+    });
+
+    statusCheckSentAtRef.current.set('segmented', Date.now() + 1);
     dispatch({
       kind: 'chat_subscribed',
-      sessionId: 'A',
-      isProcessing: true,
+      sessionId: 'segmented',
+      isProcessing: false,
+      lastSeq: 0,
     } as unknown as ServerEvent);
-    dispatch(event('stream_delta', 'A', 'claude', 'resumed'));
-    act(() => vi.advanceTimersByTime(100));
 
-    assert.equal(result.current.getMessages('A')[0]?.content, 'resumed');
+    assert.equal(result.current.getMessages('segmented').at(-1)?.kind, 'turn_interrupted');
+  });
+
+  it('does not mark completed, failed, resumed, or tool-boundary turns', async () => {
+    const { result, dispatch, statusCheckSentAtRef } = renderBuffers();
+
+    vi.setSystemTime(new Date('2026-09-01T10:00:00.000Z'));
+
+    // The retained run has a newer terminal frame. Completed and failed runs
+    // share this terminal contract, so neither is an interruption.
+    dispatch(event('stream_delta', 'completed', 'claude', 'finished', { seq: 1 }));
+    statusCheckSentAtRef.current.set('completed', Date.now() + 1);
+    dispatch({
+      kind: 'chat_subscribed',
+      sessionId: 'completed',
+      isProcessing: false,
+      lastSeq: 2,
+    } as unknown as ServerEvent);
+
+    // Once the completed run is evicted, the refreshed transcript is the
+    // completion evidence. The streamed partial may be only a prefix.
+    dispatch(event('stream_delta', 'persisted', 'omp', 'fin', {
+      seq: 1,
+      timestamp: '2026-09-01T10:00:00.000Z',
+    }));
+    vi.setSystemTime(new Date('2026-09-01T10:05:00.000Z'));
+    const persistedHistory = [
+      {
+        id: 'persisted-user',
+        sessionId: 'persisted',
+        provider: 'omp',
+        kind: 'text',
+        role: 'user',
+        content: 'question',
+        timestamp: '2026-09-01T09:59:58.000Z',
+      },
+      {
+        id: 'persisted-answer-1',
+        sessionId: 'persisted',
+        provider: 'omp',
+        kind: 'text',
+        role: 'assistant',
+        content: 'fin',
+        timestamp: '2026-09-01T10:00:00.050Z',
+      },
+      {
+        id: 'persisted-answer-2',
+        sessionId: 'persisted',
+        provider: 'omp',
+        kind: 'text',
+        role: 'assistant',
+        content: 'ished',
+        timestamp: '2026-09-01T10:00:00.050Z',
+      },
+      {
+        id: 'later-user',
+        sessionId: 'persisted',
+        provider: 'omp',
+        kind: 'text',
+        role: 'user',
+        content: 'another tab continued',
+        timestamp: '2026-09-01T10:01:00.000Z',
+      },
+      {
+        id: 'later-answer',
+        sessionId: 'persisted',
+        provider: 'omp',
+        kind: 'text',
+        role: 'assistant',
+        content: 'unrelated later answer',
+        timestamp: '2026-09-01T10:01:01.000Z',
+      },
+    ] as NormalizedMessage[];
+    sessionMessages.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: {
+          messages: persistedHistory,
+          total: persistedHistory.length,
+          hasMore: false,
+        },
+      }),
+    });
+    await act(async () => {
+      await result.current.fetchFromServer('persisted');
+    });
+    statusCheckSentAtRef.current.set('persisted', Date.now() + 1);
+    dispatch({
+      kind: 'chat_subscribed',
+      sessionId: 'persisted',
+      isProcessing: false,
+      lastSeq: 0,
+    } as unknown as ServerEvent);
+
+    // A reasoning-only orphan is also complete when refreshed history has the
+    // assistant answer after that reasoning frame.
+    dispatch(event('thinking', 'persisted-reasoning', 'omp', 'worked it out', {
+      seq: 1,
+      timestamp: '2026-09-01T10:05:00.000Z',
+    }));
+    const reasoningHistory = [
+      {
+        id: 'reasoning-user',
+        sessionId: 'persisted-reasoning',
+        provider: 'omp',
+        kind: 'text',
+        role: 'user',
+        content: 'question',
+        timestamp: '2026-09-01T10:04:00.000Z',
+      },
+      {
+        id: 'reasoning-answer',
+        sessionId: 'persisted-reasoning',
+        provider: 'omp',
+        kind: 'text',
+        role: 'assistant',
+        content: 'answer',
+        timestamp: '2026-09-01T10:05:00.050Z',
+      },
+    ] as NormalizedMessage[];
+    sessionMessages.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: {
+          messages: reasoningHistory,
+          total: reasoningHistory.length,
+          hasMore: false,
+        },
+      }),
+    });
+    await act(async () => {
+      await result.current.fetchFromServer('persisted-reasoning');
+    });
+    statusCheckSentAtRef.current.set('persisted-reasoning', Date.now() + 1);
+    dispatch({
+      kind: 'chat_subscribed',
+      sessionId: 'persisted-reasoning',
+      isProcessing: false,
+      lastSeq: 0,
+    } as unknown as ServerEvent);
+
+    // A processing acknowledgement is followed by replay, then normal sealing.
+    dispatch(event('stream_delta', 'resumed', 'omp', 'before ', { seq: 1 }));
+    statusCheckSentAtRef.current.set('resumed', Date.now() + 1);
+    dispatch({
+      kind: 'chat_subscribed',
+      sessionId: 'resumed',
+      isProcessing: true,
+      lastSeq: 2,
+    } as unknown as ServerEvent);
+    dispatch(event('stream_delta', 'resumed', 'omp', 'after', { seq: 2 }));
+    dispatch(event('complete', 'resumed', 'omp', undefined, { seq: 3, success: true }));
+
+    // A stream boundary retires the buffer before the tool row arrives.
+    dispatch(event('stream_delta', 'tool', 'claude', 'Using a tool.', { seq: 1 }));
+    dispatch(event('stream_end', 'tool', 'claude', undefined, { seq: 2 }));
+    dispatch(event('tool_use', 'tool', 'claude', undefined, {
+      seq: 3,
+      toolId: 'call-1',
+      toolName: 'Read',
+    }));
+    statusCheckSentAtRef.current.set('tool', Date.now() + 1);
+    dispatch({
+      kind: 'chat_subscribed',
+      sessionId: 'tool',
+      isProcessing: false,
+      lastSeq: 4,
+    } as unknown as ServerEvent);
+
+    assert.equal(
+      [
+        ...result.current.getMessages('completed'),
+        ...result.current.getMessages('persisted'),
+        ...result.current.getMessages('persisted-reasoning'),
+        ...result.current.getMessages('resumed'),
+        ...result.current.getMessages('tool'),
+      ]
+        .some(message => message.kind === 'turn_interrupted'),
+      false,
+    );
+    assert.equal(result.current.getMessages('resumed')[0]?.content, 'before after');
   });
 
   it('prunes a live reasoning block when persisted parts preserve whitespace across their boundary', async () => {
@@ -195,7 +466,13 @@ describe('session-keyed realtime buffers', () => {
     });
 
     act(() => {
-      result.current.updateThinking('A', '__thinking_A_1', 'First second', 'omp');
+      result.current.updateThinking(
+        'A',
+        '__thinking_A_1',
+        'First second',
+        'omp',
+        '2026-09-01T09:00:02.000Z',
+      );
     });
     await act(async () => {
       await result.current.fetchFromServer('A');

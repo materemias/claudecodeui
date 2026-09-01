@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { describe, expect, it } from 'vitest';
 
 import type { ChatMessage } from '@/shared/types';
+import { i18n } from '@/modules/i18n';
 import { buildTranscriptExport, toExportFileStem } from '@/modules/chat/utils/chatExport';
 import { createCachedDiffCalculator } from '@/modules/chat/utils/messageTransforms';
 
@@ -20,6 +21,12 @@ const assistantMessage: ChatMessage = {
   content: 'Done. Here is the change:\n\n```js\nconst renamed = 1;\n```',
   timestamp: new Date('2026-08-24T09:01:00.000Z'),
 } as ChatMessage;
+
+const interruptedMessage: ChatMessage = {
+  type: 'assistant',
+  isTurnInterrupted: true,
+  timestamp: new Date('2026-08-24T09:00:45.000Z'),
+};
 
 // A tool call is typed `assistant` with empty content, which is exactly why an
 // exporter that branches on `type` alone loses all of them.
@@ -63,6 +70,15 @@ describe('markdown export', () => {
     expect(markdown).toContain('Please rename the helper');
     expect(markdown).toContain('### Claude');
     expect(markdown).toContain('const renamed = 1;');
+  });
+
+  it('keeps a localized interrupted-turn notice', async () => {
+    const markdown = await buildTranscriptExport('markdown', {
+      ...input,
+      messages: [interruptedMessage],
+    }, exportedAt);
+
+    expect(markdown).toContain(i18n.t('session.messages.turnInterrupted', { ns: 'chat' }));
   });
 
   it('fences content that already contains a fence', async () => {
@@ -171,6 +187,17 @@ describe('html export', () => {
     // The fenced block became real markup; the fence characters are gone.
     expect(html).toContain('<code');
     expect(html).not.toContain('```js');
+  });
+
+  it('renders an interrupted-turn notice through the transcript component', async () => {
+    const html = await buildTranscriptExport(
+      'html',
+      { ...input, messages: [interruptedMessage] },
+      exportedAt,
+    );
+
+    expect(html).toContain(i18n.t('session.messages.turnInterrupted', { ns: 'chat' }));
+    expect(html).toContain('italic');
   });
 
   it('escapes a session title that contains markup', async () => {

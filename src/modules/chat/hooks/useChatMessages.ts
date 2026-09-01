@@ -331,6 +331,15 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
         });
         break;
 
+      case 'turn_interrupted':
+        converted.push({
+          type: 'assistant',
+          timestamp: msg.timestamp,
+          isTurnInterrupted: true,
+          ...sharedMetadata,
+        });
+        break;
+
       case 'task_notification':
         converted.push({
           type: 'assistant',
