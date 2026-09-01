@@ -436,6 +436,9 @@ async function refreshLatestSlotFromServer(
     limit,
     offset: 0,
   });
+  if (!canRequest()) {
+    return { applied: false, changed: false, deferred: true };
+  }
 
   let nextServerMessages: NormalizedMessage[] | null = null;
   let nextHasMore = previousHasMore;
@@ -472,6 +475,9 @@ async function refreshLatestSlotFromServer(
       }
 
       const bridgePage = await requestSessionHistoryPage(sessionId, bridgeRequest);
+      if (!canRequest()) {
+        return { applied: false, changed: false, deferred: true };
+      }
       if (bridgePage.total !== latestPage.total) {
         console.warn(`[SessionStore] History changed while bridging ${sessionId}; retaining cached suffix.`);
         return { applied: false, changed: false, deferred: false };
@@ -602,6 +608,11 @@ export function useSessionStore() {
 
       try {
         const data = await requestSessionHistoryPage(sessionId, requestOptions);
+        if (!canRequest()) {
+          slot.status = 'idle';
+          notify(sessionId);
+          return null;
+        }
         slot.serverMessages = data.messages;
         slot.total = data.total;
         slot.hasMore = data.hasMore;
@@ -658,6 +669,7 @@ export function useSessionStore() {
             limit: opts.limit ?? SESSION_MESSAGES_PAGE_SIZE,
             offset: slot.offset,
           });
+          if (!canRequest()) break;
           const olderMerge = mergeOlderServerPage(cachedMessages, data.messages);
           const shiftedWhileFetching = (
             data.total !== expectedTotal

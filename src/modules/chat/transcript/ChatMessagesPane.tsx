@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useMemo } from 'react';
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import { memo, useCallback, useMemo, useRef } from 'react';
+import type { Dispatch, RefObject, SetStateAction, TouchEvent, WheelEvent } from 'react';
 
 import type { ChatMessage,
   Project,
@@ -27,8 +27,8 @@ const INITIAL_MOUNTED_TAIL_ROWS = 30;
 
 type ChatMessagesPaneProps = {
   scrollContainerRef: RefObject<HTMLDivElement>;
-  onWheel: () => void;
-  onTouchMove: () => void;
+  onScrollCheck: () => void;
+  onReadGesture: () => void;
   isLoadingSessionMessages: boolean;
   /** True while the viewed session has an active provider run in flight. */
   isProcessing?: boolean;
@@ -83,8 +83,8 @@ type ChatMessagesPaneProps = {
  */
 function ChatMessagesPane({
   scrollContainerRef,
-  onWheel,
-  onTouchMove,
+  onScrollCheck,
+  onReadGesture,
   isLoadingSessionMessages,
   isProcessing = false,
   hasActivityIndicator = false,
@@ -165,11 +165,33 @@ function ChatMessagesPane({
     [messageKeyMap],
   );
 
+  const touchYRef = useRef<number | null>(null);
+  const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+    onScrollCheck();
+    if (event.deltaY < 0) onReadGesture();
+  }, [onReadGesture, onScrollCheck]);
+  const handleTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    touchYRef.current = event.touches[0]?.clientY ?? null;
+  }, []);
+  const handleTouchMove = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    onScrollCheck();
+    const nextY = event.touches[0]?.clientY ?? null;
+    if (nextY !== null && touchYRef.current !== null && nextY > touchYRef.current) {
+      onReadGesture();
+    }
+    touchYRef.current = nextY;
+  }, [onReadGesture, onScrollCheck]);
+  const handleTouchEnd = useCallback(() => {
+    touchYRef.current = null;
+  }, []);
+
   return (
     <div
       ref={scrollContainerRef}
-      onWheel={onWheel}
-      onTouchMove={onTouchMove}
+      onWheel={handleWheel}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
       className={`chat-messages-pane relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-3 sm:pt-4 ${
         hasActivityIndicator ? 'pb-12 sm:pb-14' : 'pb-3 sm:pb-4'
       }`}

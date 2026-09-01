@@ -198,7 +198,7 @@ export function useChatSessionState({
   const [isLoadingMoreMessages, setIsLoadingMoreMessages] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [totalMessages, setTotalMessages] = useState(0);
-  const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
+  const [isUserScrolledUp, setIsUserScrolledUpState] = useState(false);
   const [tokenBudget, setTokenBudget] = useState<Record<string, unknown> | null>(null);
   const [visibleMessageCount, setVisibleMessageCount] = useState(INITIAL_VISIBLE_MESSAGES);
   const [allMessagesLoaded, setAllMessagesLoaded] = useState(false);
@@ -219,22 +219,29 @@ export function useChatSessionState({
    */
   const searchScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
-   * `isUserScrolledUp` readable from a timer callback. Both deferred
-   * scroll-to-bottom calls are armed while the user is at the bottom and fire
-   * tens to hundreds of milliseconds later; without re-reading this at fire
-   * time, a scroll-up inside that window is silently undone.
+   * Scroll ownership is mirrored synchronously so a wheel or touch gesture can
+   * beat layout effects scheduled by the same render.
    */
   const isUserScrolledUpRef = useRef(false);
   const isLoadingMoreRef = useRef(false);
   const allMessagesLoadedRef = useRef(false);
   const topLoadLockRef = useRef(false);
   const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
-  const pendingInitialScrollRef = useRef(true);
   const messagesOffsetRef = useRef(0);
   const scrollPositionRef = useRef({ height: 0, top: 0 });
   const loadAllFinishedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadAllOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadedSessionKeyRef = useRef<string | null>(null);
+  const transcriptGenerationRef = useRef(0);
+  const transcriptIdentityRef = useRef<string | null>(null);
+  const transcriptIdentity = `${selectedProject?.projectId ?? ''}:${selectedSession?.id ?? ''}`;
+  if (transcriptIdentityRef.current !== transcriptIdentity) {
+    transcriptIdentityRef.current = transcriptIdentity;
+    transcriptGenerationRef.current += 1;
+    isLoadingMoreRef.current = false;
+    isUserScrolledUpRef.current = false;
+  }
+  const transcriptGeneration = transcriptGenerationRef.current;
   /**
    * Tracks the last processed value from `useProjectsState.newSessionTrigger`.
    *
@@ -289,7 +296,7 @@ export function useChatSessionState({
     searchScrollActiveRef.current = false;
     topLoadLockRef.current = false;
     pendingScrollRestoreRef.current = null;
-    pendingInitialScrollRef.current = true;
+    setIsLoadingMoreMessages(false);
     lastLoadedSessionKeyRef.current = null;
 
     if (loadAllOverlayTimerRef.current) {
@@ -326,19 +333,28 @@ export function useChatSessionState({
   isActiveRef.current = isActive;
   activeSessionIdRef.current = activeSessionId;
 
+  const ownsTranscript = useCallback((
+    generation: number,
+    identity: string,
+    sessionId: string,
+  ) => (
+    generation === transcriptGenerationRef.current
+    && identity === transcriptIdentityRef.current
+    && activeSessionIdRef.current === sessionId
+  ), []);
+
   const latestRefreshExecutorRef = useRef<(sessionId: string) => Promise<boolean | void>>(
     async () => true,
   );
   latestRefreshExecutorRef.current = async (sessionId: string) => {
+    const requestGeneration = transcriptGenerationRef.current;
+    const requestIdentity = transcriptIdentityRef.current ?? '';
     const result = await sessionStore.refreshLatestFromServer(sessionId, {
       limit: SESSION_MESSAGES_PAGE_SIZE,
-      canRequest: () => (
-        isActiveRef.current
-        && activeSessionIdRef.current === sessionId
-      ),
+      canRequest: () => ownsTranscript(requestGeneration, requestIdentity, sessionId),
     });
     const slot = result.slot;
-    if (slot && activeSessionIdRef.current === sessionId) {
+    if (slot && ownsTranscript(requestGeneration, requestIdentity, sessionId)) {
       setHasMoreMessages(slot.hasMore);
       setTotalMessages(slot.total);
       messagesOffsetRef.current = slot.offset;
@@ -428,13 +444,10 @@ export function useChatSessionState({
     }
   }, [activeSessionId, sessionStore]);
 
-  // Mirrors the state into a ref so the two deferred scroll-to-bottom timers
-  // can re-read it at fire time. An effect rather than assignments next to each
-  // `setIsUserScrolledUp` call, because the setter is also returned from this
-  // hook and driven from the composer.
-  useEffect(() => {
-    isUserScrolledUpRef.current = isUserScrolledUp;
-  }, [isUserScrolledUp]);
+  const setIsUserScrolledUp = useCallback((next: boolean) => {
+    isUserScrolledUpRef.current = next;
+    setIsUserScrolledUpState(next);
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -458,6 +471,11 @@ export function useChatSessionState({
     return scrollHeight - scrollTop - clientHeight < 50;
   }, []);
 
+  const handleUserScrollGesture = useCallback(() => {
+    if (transcriptGeneration !== transcriptGenerationRef.current) return;
+    setIsUserScrolledUp(true);
+  }, [setIsUserScrolledUp, transcriptGeneration]);
+
   const loadOlderMessages = useCallback(
     async (container: HTMLDivElement) => {
       if (!isActive) return false;
@@ -465,18 +483,22 @@ export function useChatSessionState({
       if (allMessagesLoadedRef.current) return false;
       if (!hasMoreMessages || !selectedSession || !selectedProject) return false;
 
+      const requestGeneration = transcriptGeneration;
+      const requestIdentity = transcriptIdentity;
+      const requestSessionId = selectedSession.id;
+      if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return false;
+
       isLoadingMoreRef.current = true;
       setIsLoadingMoreMessages(true);
       const scrollRestoreState = captureScrollRestoreState(container);
 
       try {
-        const result = await sessionStore.fetchMore(selectedSession.id, {
+        const result = await sessionStore.fetchMore(requestSessionId, {
           limit: SESSION_MESSAGES_PAGE_SIZE,
-          canRequest: () => (
-            isActiveRef.current
-            && activeSessionIdRef.current === selectedSession.id
-          ),
+          canRequest: () => ownsTranscript(requestGeneration, requestIdentity, requestSessionId),
         });
+        if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return false;
+
         const { slot, prependedCount } = result;
         setHasMoreMessages(slot.hasMore);
         setTotalMessages(slot.total);
@@ -511,15 +533,27 @@ export function useChatSessionState({
         }
         return true;
       } finally {
-        isLoadingMoreRef.current = false;
-        setIsLoadingMoreMessages(false);
+        if (ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) {
+          isLoadingMoreRef.current = false;
+          setIsLoadingMoreMessages(false);
+        }
       }
     },
-    [hasMoreMessages, isActive, isLoadingMoreMessages, selectedProject, selectedSession, sessionStore],
+    [
+      hasMoreMessages,
+      isActive,
+      isLoadingMoreMessages,
+      ownsTranscript,
+      selectedProject,
+      selectedSession,
+      sessionStore,
+      transcriptGeneration,
+      transcriptIdentity,
+    ],
   );
 
   const handleScroll = useCallback(async () => {
-    if (!isActive) return;
+    if (!isActive || transcriptGeneration !== transcriptGenerationRef.current) return;
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -555,9 +589,18 @@ export function useChatSessionState({
         return;
       }
       const didLoad = await loadOlderMessages(container);
-      if (didLoad) topLoadLockRef.current = true;
+      if (didLoad && transcriptGeneration === transcriptGenerationRef.current) {
+        topLoadLockRef.current = true;
+      }
     }
-  }, [hasMoreMessages, isActive, isNearBottom, loadOlderMessages]);
+  }, [
+    hasMoreMessages,
+    isActive,
+    isNearBottom,
+    loadOlderMessages,
+    setIsUserScrolledUp,
+    transcriptGeneration,
+  ]);
 
   const wasChatActiveRef = useRef(isActive);
   useLayoutEffect(() => {
@@ -582,11 +625,11 @@ export function useChatSessionState({
     }
 
     if (becameActive) {
-      container.scrollTop = isUserScrolledUp
+      container.scrollTop = isUserScrolledUpRef.current
         ? scrollPositionRef.current.top
         : container.scrollHeight;
     }
-  }, [chatMessages.length, isActive, isUserScrolledUp]);
+  }, [chatMessages.length, isActive, transcriptGeneration]);
 
   // Reset scroll/pagination state on session change
   useEffect(() => {
@@ -607,57 +650,13 @@ export function useChatSessionState({
     searchScrollActiveRef.current = false;
     setSearchTarget(null);
 
-    pendingInitialScrollRef.current = true;
     setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
+    setIsLoadingMoreMessages(false);
     topLoadLockRef.current = false;
     pendingScrollRestoreRef.current = null;
     wasNearTopRef.current = false;
     setIsUserScrolledUp(false);
-  }, [selectedProject?.projectId, selectedSession?.id]);
-
-  // Initial scroll to bottom — robust to lazy content reflow.
-  // The previous implementation fired one scrollToBottom() at +200ms and
-  // cleared the pending flag. When markdown blocks, code highlighting, or
-  // images finished rendering after that window, scrollHeight grew but
-  // nothing re-anchored the viewport, leaving the chat tab visually
-  // "scrolled way up" with the latest assistant message off-screen.
-  //
-  // This version re-scrolls every animation frame while scrollHeight is
-  // still growing, capped at ~1s (60 frames) or 3 consecutive stable
-  // frames. Cancels cleanly on session change via the pending flag.
-  useEffect(() => {
-    if (!isActive) return;
-    if (!pendingInitialScrollRef.current || !scrollContainerRef.current || isLoadingSessionMessages) return;
-    if (chatMessages.length === 0) { pendingInitialScrollRef.current = false; return; }
-    if (searchScrollActiveRef.current) { pendingInitialScrollRef.current = false; return; }
-
-    const container = scrollContainerRef.current;
-    let frame = 0;
-    let lastHeight = 0;
-    let stableCount = 0;
-    let rafId = 0;
-
-    const tick = () => {
-      if (!pendingInitialScrollRef.current || !scrollContainerRef.current) return;
-      container.scrollTop = container.scrollHeight;
-      if (container.scrollHeight === lastHeight) {
-        stableCount++;
-      } else {
-        stableCount = 0;
-        lastHeight = container.scrollHeight;
-      }
-      frame++;
-      if (stableCount < 3 && frame < 60) {
-        rafId = requestAnimationFrame(tick);
-      } else {
-        pendingInitialScrollRef.current = false;
-      }
-    };
-    rafId = requestAnimationFrame(tick);
-    return () => {
-      if (rafId) cancelAnimationFrame(rafId);
-    };
-  }, [chatMessages.length, isActive, isLoadingSessionMessages, scrollToBottom]);
+  }, [selectedProject?.projectId, selectedSession?.id, setIsUserScrolledUp]);
 
   // Session replay/subscription remains active regardless of which main tab is
   // visible. Only persisted-history HTTP traffic is visibility-gated below.
@@ -752,15 +751,15 @@ export function useChatSessionState({
     lastLoadedSessionKeyRef.current = sessionKey;
 
     // Fetch from server → store updates → chatMessages re-derives automatically
+    const requestGeneration = transcriptGeneration;
+    const requestIdentity = transcriptIdentity;
     setIsLoadingSessionMessages(true);
     sessionStore.fetchFromServer(selectedSessionId, {
       limit: SESSION_MESSAGES_PAGE_SIZE,
       offset: 0,
-      canRequest: () => (
-        isActiveRef.current
-        && activeSessionIdRef.current === selectedSessionId
-      ),
+      canRequest: () => ownsTranscript(requestGeneration, requestIdentity, selectedSessionId),
     }).then(slot => {
+      if (!ownsTranscript(requestGeneration, requestIdentity, selectedSessionId)) return;
       if (slot) {
         setHasMoreMessages(slot.hasMore);
         setTotalMessages(slot.total);
@@ -771,15 +770,20 @@ export function useChatSessionState({
       }
       setIsLoadingSessionMessages(false);
     }).catch(() => {
-      setIsLoadingSessionMessages(false);
+      if (ownsTranscript(requestGeneration, requestIdentity, selectedSessionId)) {
+        setIsLoadingSessionMessages(false);
+      }
     });
   }, [
     isActive,
+    ownsTranscript,
     resetStreamingState,
     requestLatestMessages,
     selectedProject,
     selectedSession?.id,
     sessionStore,
+    transcriptGeneration,
+    transcriptIdentity,
   ]);
 
   // Hidden refresh signals are coalesced. An initial page load supersedes a
@@ -803,18 +807,10 @@ export function useChatSessionState({
 
     const reloadExternalMessages = async () => {
       try {
-        // Skip store refresh during active streaming
+        // Skip store refresh during active streaming. The shared transcript
+        // layout effect owns any bottom follow after the refresh commits.
         if (!isProcessing) {
-          const shouldStickToBottom = isActiveRef.current && isNearBottom();
           await requestLatestMessages(selectedSession.id);
-
-          if (shouldStickToBottom) {
-            setTimeout(() => {
-              if (!isUserScrolledUpRef.current) {
-                scrollToBottom();
-              }
-            }, 200);
-          }
         }
       } catch (error) {
         console.error('Error reloading messages from external update:', error);
@@ -825,7 +821,6 @@ export function useChatSessionState({
   }, [
     externalMessageUpdate,
     requestLatestMessages,
-    scrollToBottom,
     selectedProject,
     selectedSession,
     isProcessing,
@@ -850,43 +845,48 @@ export function useChatSessionState({
     if (!isActive || !searchTarget || chatMessages.length === 0 || isLoadingSessionMessages) return;
 
     const target = searchTarget;
+    const requestGeneration = transcriptGeneration;
+    const requestIdentity = transcriptIdentity;
+    const requestSessionId = selectedSession?.id;
     setSearchTarget(null);
 
     const scrollToTarget = async () => {
-      if (!allMessagesLoadedRef.current && selectedSession && selectedProject) {
-          try {
-            // Load all messages into the store for search navigation
-            const slot = await sessionStore.fetchFromServer(selectedSession.id, {
-              limit: null,
-              offset: 0,
-              canRequest: () => (
-                isActiveRef.current
-                && activeSessionIdRef.current === selectedSession.id
-              ),
-            });
-            if (slot) {
-              // Fetch the whole transcript so an old hit can be found, but do
-              // not render all of it — the window below is widened to exactly
-              // what the resolved target needs.
-              setHasMoreMessages(false);
-              setTotalMessages(slot.total);
-              messagesOffsetRef.current = slot.offset;
-              setAllMessagesLoaded(true);
-              allMessagesLoadedRef.current = true;
-            } else if (!isActiveRef.current) {
-              setSearchTarget(target);
-              return;
-            }
-          } catch {
-            // Fall through and scroll in current messages
-          }
+      if (!requestSessionId || !ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) {
+        return;
       }
+      if (!allMessagesLoadedRef.current && selectedProject) {
+        try {
+          // Load all messages into the store for search navigation
+          const slot = await sessionStore.fetchFromServer(requestSessionId, {
+            limit: null,
+            offset: 0,
+            canRequest: () => ownsTranscript(requestGeneration, requestIdentity, requestSessionId),
+          });
+          if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
+          if (slot) {
+            // Fetch the whole transcript so an old hit can be found, but do
+            // not render all of it — the window below is widened to exactly
+            // what the resolved target needs.
+            setHasMoreMessages(false);
+            setTotalMessages(slot.total);
+            messagesOffsetRef.current = slot.offset;
+            setAllMessagesLoaded(true);
+            allMessagesLoadedRef.current = true;
+          } else if (!isActiveRef.current) {
+            setSearchTarget(target);
+            return;
+          }
+        } catch {
+          // Fall through and scroll in current messages
+        }
+      }
+      if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
       // Resolve the target against the loaded transcript rather than the DOM.
       // The store is the freshest source here: the `fetchFromServer` above has
       // landed but `chatMessages` is from the render that scheduled this effect.
-      const messagesForSearch = activeSessionIdRef.current
-        ? normalizedToChatMessages(sessionStore.getMessages(activeSessionIdRef.current))
-        : chatMessages;
+      const messagesForSearch = normalizedToChatMessages(
+        sessionStore.getMessages(requestSessionId),
+      );
       const targetIndex = findSearchTargetIndex(messagesForSearch, target);
       if (targetIndex < 0) {
         // The target is not in the transcript at all. Scrolling somewhere
@@ -907,6 +907,7 @@ export function useChatSessionState({
       const targetTimestamp = messagesForSearch[targetIndex].timestamp;
 
       const scrollToRenderedTarget = (retriesLeft: number) => {
+        if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
         const container = scrollContainerRef.current;
         if (!container) return;
 
@@ -956,13 +957,20 @@ export function useChatSessionState({
       setTokenBudget(null);
       return;
     }
+
+    const requestSessionId = selectedSession.id;
+    const requestGeneration = transcriptGeneration;
+    const requestIdentity = transcriptIdentity;
     const fetchInitialTokenUsage = async () => {
       try {
         // The provider module resolves storage and provider details from the session id.
-        const response = await api.providers.sessionTokenUsage(selectedSession.id);
+        const response = await api.providers.sessionTokenUsage(requestSessionId);
+        if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
         if (response.ok) {
           const payload = await response.json();
-          setTokenBudget(payload.data ?? null);
+          if (ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) {
+            setTokenBudget(payload.data ?? null);
+          }
         } else {
           setTokenBudget(null);
         }
@@ -971,7 +979,12 @@ export function useChatSessionState({
       }
     };
     fetchInitialTokenUsage();
-  }, [selectedSession?.id]);
+  }, [
+    ownsTranscript,
+    selectedSession?.id,
+    transcriptGeneration,
+    transcriptIdentity,
+  ]);
 
   const visibleMessages = useMemo(() => {
     if (chatMessages.length <= visibleMessageCount) return chatMessages;
@@ -985,20 +998,21 @@ export function useChatSessionState({
     scrollPositionRef.current = { height: container.scrollHeight, top: container.scrollTop };
   });
 
-  useEffect(() => {
-    if (!isActive) return;
+  useLayoutEffect(() => {
+    if (!isActive || isLoadingSessionMessages) return;
     if (!scrollContainerRef.current || chatMessages.length === 0) return;
     if (isLoadingMoreRef.current || isLoadingMoreMessages || pendingScrollRestoreRef.current) return;
-    if (searchScrollActiveRef.current) return;
+    if (searchScrollActiveRef.current || isUserScrolledUpRef.current) return;
 
-    if (!isUserScrolledUp) {
-      setTimeout(() => {
-        if (!isUserScrolledUpRef.current) {
-          scrollToBottom();
-        }
-      }, 50);
-    }
-  }, [chatMessages.length, isActive, isLoadingMoreMessages, isUserScrolledUp, scrollToBottom]);
+    scrollToBottom();
+  }, [
+    chatMessages,
+    isActive,
+    isLoadingMoreMessages,
+    isLoadingSessionMessages,
+    scrollToBottom,
+    transcriptGeneration,
+  ]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -1015,6 +1029,9 @@ export function useChatSessionState({
     if (!selectedSession || !selectedProject) return;
     if (isLoadingAllMessages) return;
     const requestSessionId = selectedSession.id;
+    const requestGeneration = transcriptGeneration;
+    const requestIdentity = transcriptIdentity;
+    if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
     allMessagesLoadedRef.current = true;
     isLoadingMoreRef.current = true;
     setIsLoadingAllMessages(true);
@@ -1031,13 +1048,10 @@ export function useChatSessionState({
       const slot = await sessionStore.fetchFromServer(requestSessionId, {
         limit: null,
         offset: 0,
-        canRequest: () => (
-          isActiveRef.current
-          && activeSessionIdRef.current === requestSessionId
-        ),
+        canRequest: () => ownsTranscript(requestGeneration, requestIdentity, requestSessionId),
       });
 
-      if (currentSessionId !== requestSessionId) return;
+      if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
 
       if (slot) {
         if (scrollRestoreState) {
@@ -1062,14 +1076,27 @@ export function useChatSessionState({
         setShowLoadAllOverlay(false);
       }
     } catch (error) {
-      console.error('Error loading all messages:', error);
-      allMessagesLoadedRef.current = false;
-      setShowLoadAllOverlay(false);
+      if (ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) {
+        console.error('Error loading all messages:', error);
+        allMessagesLoadedRef.current = false;
+        setShowLoadAllOverlay(false);
+      }
     } finally {
-      isLoadingMoreRef.current = false;
-      setIsLoadingAllMessages(false);
+      if (ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) {
+        isLoadingMoreRef.current = false;
+        setIsLoadingAllMessages(false);
+      }
     }
-  }, [isActive, selectedSession, selectedProject, isLoadingAllMessages, currentSessionId, sessionStore]);
+  }, [
+    isActive,
+    isLoadingAllMessages,
+    ownsTranscript,
+    selectedProject,
+    selectedSession,
+    sessionStore,
+    transcriptGeneration,
+    transcriptIdentity,
+  ]);
 
   /**
    * Fetches the whole transcript into the store and returns it, without
@@ -1115,6 +1142,7 @@ export function useChatSessionState({
     tokenBudget,
     setTokenBudget,
     visibleMessageCount,
+    handleUserScrollGesture,
     visibleMessages,
     loadEarlierMessages,
     loadAllMessages,

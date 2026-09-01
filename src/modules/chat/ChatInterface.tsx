@@ -141,6 +141,7 @@ function ChatInterface({
     tokenBudget,
     setTokenBudget,
     visibleMessageCount,
+    handleUserScrollGesture,
     visibleMessages,
     loadEarlierMessages,
     loadAllMessages,
@@ -151,7 +152,6 @@ function ChatInterface({
     showLoadAllOverlay,
     createDiff,
     scrollContainerRef,
-    scrollToBottom,
     scrollToBottomAndReset,
     handleScroll,
     requestLatestMessages,
@@ -249,7 +249,6 @@ function ChatInterface({
     onSessionEstablished: handleSessionEstablished,
     onFileOpen,
     onShowSettings,
-    scrollToBottom,
     addMessage,
     setIsUserScrolledUp,
     setPendingPermissionRequests,
@@ -414,19 +413,15 @@ function ChatInterface({
     );
   }
 
-
   return (
     <PermissionContext.Provider value={permissionContextValue}>
       <div className="flex h-full min-h-0 flex-col">
         <ChatMessagesPane
           scrollContainerRef={scrollContainerRef}
-          // Not redundant with the `scroll` listener. A first page is 20 rows,
-          // tool results fold into their calls, and the "load earlier" link is
-          // hidden while more pages exist — so a short transcript is often not
-          // scrollable at all and never emits `scroll`. Wheel and touch are
-          // then the only way to reach the top pager or the "load all" overlay.
-          onWheel={handleScroll}
-          onTouchMove={handleScroll}
+          // A short transcript may not emit `scroll`, so wheel and touch
+          // gestures also run the top-pager check.
+          onScrollCheck={handleScroll}
+          onReadGesture={handleUserScrollGesture}
           isLoadingSessionMessages={isLoadingSessionMessages}
           isProcessing={isProcessing}
           hasActivityIndicator={hasActivityIndicator}
