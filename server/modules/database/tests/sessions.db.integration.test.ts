@@ -114,3 +114,91 @@ test('recent sessions are globally ordered, paginated, and limited to visible co
     );
   });
 });
+
+test('provider config reports acknowledge only matching sticky choices', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('session-omp', 'omp', '/workspace/demo-project');
+    sessionsDb.setSessionModel('session-omp', 'anthropic/claude-opus-5', true);
+    sessionsDb.setSessionEffort('session-omp', 'high', true);
+
+    assert.equal(sessionsDb.applySessionConfigReport('session-omp', {
+      source: 'live',
+      updates: [
+        { field: 'model', value: 'zai/glm-5.3' },
+        { field: 'effort', value: 'low' },
+      ],
+    }), false);
+    let row = sessionsDb.getSessionById('session-omp');
+    assert.equal(row?.live_model, null);
+    assert.equal(row?.live_effort, null);
+    assert.equal(row?.model_dirty, 1);
+    assert.equal(row?.effort_dirty, 1);
+
+    assert.equal(sessionsDb.applySessionConfigReport('session-omp', {
+      source: 'live',
+      updates: [
+        { field: 'model', value: 'anthropic/claude-opus-5' },
+        { field: 'effort', value: 'low' },
+      ],
+    }), true);
+    row = sessionsDb.getSessionById('session-omp');
+    assert.equal(row?.live_model, 'anthropic/claude-opus-5');
+    assert.equal(row?.model_dirty, 0);
+    assert.equal(row?.live_effort, null);
+    assert.equal(row?.effort_dirty, 1);
+
+    sessionsDb.applySessionConfigReport('session-omp', {
+      source: 'snapshot',
+      updates: [{ field: 'effort', value: 'high' }],
+    });
+    row = sessionsDb.getSessionById('session-omp');
+    assert.equal(row?.live_effort, 'high');
+    assert.equal(row?.effort_dirty, 0);
+
+    sessionsDb.applySessionConfigReport('session-omp', {
+      source: 'live',
+      updates: [
+        { field: 'model', value: 'zai/glm-5.3' },
+        { field: 'effort', value: 'max' },
+      ],
+    });
+    sessionsDb.recordSessionModelOnSend('session-omp', 'zai/glm-5.3', true);
+    sessionsDb.recordSessionEffortOnSend('session-omp', 'max', true);
+    row = sessionsDb.getSessionById('session-omp');
+    assert.equal(row?.model, 'anthropic/claude-opus-5', 'live model echo is not a new pin');
+    assert.equal(row?.effort, 'high', 'live effort echo is not a new pin');
+    assert.equal(row?.live_model, 'zai/glm-5.3');
+    assert.equal(row?.live_effort, 'max');
+    assert.equal(row?.model_dirty, 0);
+    assert.equal(row?.effort_dirty, 0);
+  });
+});
+
+test('resetting provider identity retires live state and rearms desired values', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('session-reset', 'omp', '/workspace/demo-project');
+    sessionsDb.setSessionModel('session-reset', 'zai/glm-5.3', false);
+    sessionsDb.setSessionEffort('session-reset', 'high', false);
+    sessionsDb.applySessionConfigReport('session-reset', {
+      source: 'live',
+      updates: [
+        { field: 'model', value: 'anthropic/claude-opus-5' },
+        { field: 'effort', value: 'max' },
+      ],
+    });
+
+    sessionsDb.repointSessionToProviderSession('session-reset', {
+      providerSessionId: 'native-new',
+      jsonlPath: null,
+      resetLiveConfig: true,
+      rearmModel: true,
+      rearmEffort: true,
+    });
+
+    const row = sessionsDb.getSessionById('session-reset');
+    assert.equal(row?.live_model, null);
+    assert.equal(row?.live_effort, null);
+    assert.equal(row?.model_dirty, 1);
+    assert.equal(row?.effort_dirty, 1);
+  });
+});

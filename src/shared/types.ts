@@ -67,6 +67,19 @@ export type ScheduledMessage = {
   createdAt: string;
 };
 
+/**
+ * Persisted session model/effort state. Dirty values are explicit user choices
+ * awaiting the matching provider report.
+ */
+export type ProviderSessionSelectionSnapshot = {
+  model: string | null;
+  effort: string | null;
+  liveModel: string | null;
+  liveEffort: string | null;
+  modelDirty: boolean;
+  effortDirty: boolean;
+};
+
 /** A single conversation inside a project, as returned by the sessions API and rendered in the sidebar and chat. */
 export type ProjectSession = {
   id: string;
@@ -80,6 +93,7 @@ export type ProjectSession = {
   messageCount?: number;
   provider?: LLMProvider;
   __provider?: LLMProvider;
+  selection?: ProviderSessionSelectionSnapshot;
   // Tags the session with the owning project's DB `projectId` so UI handlers
   // (session switching, sidebar focus, etc.) can match against selectedProject.
   __projectId?: string;
@@ -207,6 +221,23 @@ export type ServerEvent = {
   sessionId?: string;
   seq?: number;
   [key: string]: unknown;
+};
+/** Centralized per-session delta emitted by the backend session-upsert owner. */
+export type SessionUpsertedEvent = ServerEvent & {
+  kind: 'session_upserted';
+  sessionId: string;
+  providerSessionId: string | null;
+  provider: LLMProvider;
+  session: ProjectSession & {
+    selection: ProviderSessionSelectionSnapshot;
+  };
+  project: {
+    projectId: string;
+    path: string;
+    fullPath: string;
+    displayName: string;
+    isStarred: boolean;
+  } | null;
 };
 
 

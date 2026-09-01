@@ -143,32 +143,74 @@ export type ProviderCurrentActiveModel = {
  *
  * `session` means the app has recorded a model for this session (the user
  * picked one, or the session has been sent on at least once) and that value is
- * authoritative. `provider` means the session predates any app-recorded model
- * and the value was read back from the provider's own session state — the case
- * for sessions started directly in a provider CLI. `default` means neither was
- * available and the catalog default is standing in.
- *
- * Routes surface this so the frontend can tell a real selection apart from a
- * placeholder without re-deriving the precedence chain.
+ * authoritative. `provider` means the value was read from provider-owned
+ * session state. `default` means neither was available and the catalog default
+ * is standing in.
  */
 export type ProviderSessionModelSource = 'session' | 'provider' | 'default';
 
 /**
- * The model one session runs with, its persisted reasoning effort when one has
- * been recorded, and where the model answer came from.
- *
- * Returned by `providerModelsService.resolveSessionModel` and used by the
- * `/models`, `/cost` and `/status` commands, the active-model route, and the
- * composer's model picker so every surface agrees on one answer.
+ * Persisted model and effort state exposed by session reads and realtime
+ * upserts. The live values are provider reports. Dirty values are explicit
+ * user choices that the provider has not confirmed yet.
  */
-export type ProviderSessionModel = {
-  provider: LLMProvider;
-  sessionId: string | null;
-  model: string;
-  /** NULL means this session has not recorded an effort choice yet. */
+export type ProviderSessionSelectionSnapshot = {
+  model: string | null;
   effort: string | null;
-  source: ProviderSessionModelSource;
+  liveModel: string | null;
+  liveEffort: string | null;
+  modelDirty: boolean;
+  effortDirty: boolean;
 };
+
+/**
+ * A pending provider option. The discriminant prevents a dirty option from
+ * existing without the value that must be sent.
+ */
+export type PendingProviderSessionOption =
+  | { pending: false; value: string | null }
+  | { pending: true; value: string };
+
+/** Pending model and effort choices read by provider runtimes before a turn. */
+export type PendingProviderSessionSelection = {
+  sessionExists: boolean;
+  model: PendingProviderSessionOption;
+  effort: PendingProviderSessionOption;
+};
+
+/**
+ * One provider-reported config value. Only model and effort are persisted, so
+ * unrelated provider config ids cannot enter the session selection state.
+ */
+export type ProviderSessionConfigUpdate =
+  | { field: 'model'; value: string }
+  | { field: 'effort'; value: string };
+
+/**
+ * A provider config report. Snapshots may acknowledge a matching pending
+ * choice, while live reports also replace confirmed live values.
+ */
+export type ProviderSessionConfigReport = {
+  source: 'snapshot' | 'live';
+  updates: ProviderSessionConfigUpdate[];
+};
+
+/**
+ * The model one session runs with, its persisted reasoning effort, and the
+ * provider's latest reports for both values.
+ *
+ * A provider-derived answer always has a session id. The union makes the
+ * impossible "provider state with no provider session" case unrepresentable.
+ */
+type ProviderSessionModelFields = ProviderSessionSelectionSnapshot & {
+  provider: LLMProvider;
+  model: string;
+};
+
+export type ProviderSessionModel = ProviderSessionModelFields & (
+  | { sessionId: string; source: ProviderSessionModelSource }
+  | { sessionId: null; source: Exclude<ProviderSessionModelSource, 'provider'> }
+);
 
 /**
  * Message/event variants emitted by provider adapters and normalized transports.
@@ -247,6 +289,7 @@ export type SessionUpsertedEvent = {
     summary: string;
     messageCount: number;
     lastActivity: string;
+    selection: ProviderSessionSelectionSnapshot;
   };
   project: SessionUpsertedProject | null;
   timestamp: string;
@@ -446,6 +489,20 @@ export type ProviderRuntimeContext = {
   ): Promise<string | undefined>;
   getProviderModels(): Promise<ProviderModelsDefinition>;
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
+  /**
+   * Reads sticky user choices for this app session. Runtimes send only options
+   * whose `pending` discriminant is true.
+   */
+  readPendingSessionSelection(sessionId: string | undefined): PendingProviderSessionSelection;
+  /**
+   * Persists a provider config snapshot or live notification for one mapped
+   * session and publishes the changed session through the gateway owner.
+   */
+  recordSessionConfigReport(
+    appSessionId: string | null | undefined,
+    providerSessionId: string,
+    report: ProviderSessionConfigReport,
+  ): Promise<void>;
   isProviderInstalled(): Promise<boolean>;
 };
 

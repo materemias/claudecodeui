@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api } from '@/shared/api';
-import type { PendingPermissionRequest, PermissionMode,
+import type {
+  PendingPermissionRequest,
+  PermissionMode,
   ProjectSession,
   LLMProvider,
   Project,
   CustomProviderModelInput,
   ProviderModelActions,
   ProviderModelOption,
-  ProviderModelsDefinition } from '@/shared/types';
+  ProviderModelsDefinition,
+  ProviderSessionSelectionSnapshot,
+  SessionUpsertedEvent,
+} from '@/shared/types';
 import {
   DEFAULT_EFFORT_VALUE,
   OMP_CONFIGURED_MODEL_LABEL,
@@ -114,6 +119,10 @@ type SessionSelectionApiResponse = {
     sessionId?: string | null;
     model?: string | null;
     effort?: string | null;
+    liveModel?: string | null;
+    liveEffort?: string | null;
+    modelDirty?: boolean;
+    effortDirty?: boolean;
     /**
      * `session` and `provider` are real answers for this session; `default`
      * means the backend had nothing recorded and returned the catalog default,
@@ -123,12 +132,38 @@ type SessionSelectionApiResponse = {
   };
 };
 
-type SessionProviderSelection = {
+type SessionProviderSelection = ProviderSessionSelectionSnapshot & {
   provider: LLMProvider;
   sessionId: string;
-  model: string | null;
-  effort: string | null;
 };
+
+/**
+ * Merges a server snapshot without letting a pre-pick event replace a sticky
+ * local choice. A dirty field is released only by a clean report whose live
+ * value matches that exact choice.
+ */
+function mergeSessionSelection(
+  current: SessionProviderSelection,
+  incoming: SessionProviderSelection,
+): SessionProviderSelection {
+  const keepModel = current.modelDirty
+    && !(!incoming.modelDirty && incoming.liveModel === current.model);
+  const keepEffort = current.effortDirty
+    && !(!incoming.effortDirty && incoming.liveEffort === current.effort);
+  return {
+    ...incoming,
+    ...(keepModel ? {
+      model: current.model,
+      liveModel: current.liveModel,
+      modelDirty: true,
+    } : {}),
+    ...(keepEffort ? {
+      effort: current.effort,
+      liveEffort: current.liveEffort,
+      effortDirty: true,
+    } : {}),
+  };
+}
 
 const getSessionSelectionKey = (provider: LLMProvider, sessionId: string): string => (
   `${provider}:${sessionId}`
@@ -500,6 +535,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
 
   /** Model and reasoning effort recorded for the open session by the backend. */
   const [sessionSelection, setSessionSelection] = useState<SessionProviderSelection | null>(null);
+  const [sessionSelectionRefresh, setSessionSelectionRefresh] = useState(0);
   const selectedSessionId = selectedSession?.id?.trim() || null;
   const selectedSessionProvider = selectedSession?.__provider ?? provider;
   const selectedSessionKey = selectedSessionId
@@ -528,6 +564,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     let cancelled = false;
     const targetProvider = selectedSessionProvider;
     const targetSessionKey = getSessionSelectionKey(targetProvider, selectedSessionId);
+    const applySnapshot = (incoming: SessionProviderSelection) => {
+      setSessionSelection((current) => (
+        current?.provider === targetProvider && current.sessionId === selectedSessionId
+          ? mergeSessionSelection(current, incoming)
+          : incoming
+      ));
+    };
 
     const loadSessionSelection = async () => {
       try {
@@ -542,12 +585,15 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         }
 
         const resolvedModel = body.data?.model?.trim();
-        const resolvedEffort = body.data?.effort?.trim() || null;
-        setSessionSelection({
+        applySnapshot({
           provider: targetProvider,
           sessionId: selectedSessionId,
           model: body.success && resolvedModel && body.data?.source !== 'default' ? resolvedModel : null,
-          effort: body.success ? resolvedEffort : null,
+          effort: body.success ? body.data?.effort?.trim() || null : null,
+          liveModel: body.success ? body.data?.liveModel?.trim() || null : null,
+          liveEffort: body.success ? body.data?.liveEffort?.trim() || null : null,
+          modelDirty: body.success === true && body.data?.modelDirty === true,
+          effortDirty: body.success === true && body.data?.effortDirty === true,
         });
       } catch (error) {
         if (
@@ -556,11 +602,15 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
           && selectedSessionKeyRef.current === targetSessionKey
         ) {
           console.error('Error loading the session model and reasoning effort:', error);
-          setSessionSelection({
+          applySnapshot({
             provider: targetProvider,
             sessionId: selectedSessionId,
             model: null,
             effort: null,
+            liveModel: null,
+            liveEffort: null,
+            modelDirty: false,
+            effortDirty: false,
           });
         }
       }
@@ -570,7 +620,35 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     return () => {
       cancelled = true;
     };
-  }, [selectedSessionId, selectedSessionProvider]);
+  }, [selectedSessionId, selectedSessionProvider, sessionSelectionRefresh]);
+
+  const refreshSessionSelection = useCallback(() => {
+    setSessionSelectionRefresh((current) => current + 1);
+  }, []);
+
+  /**
+   * Applies the centralized session delta only to the viewed provider/session.
+   *
+   * Invalidating the GET generation prevents an older hydration response from
+   * replacing a live event that arrived while the request was in flight.
+   */
+  const applySessionUpsertedSelection = useCallback((event: SessionUpsertedEvent) => {
+    const targetKey = getSessionSelectionKey(event.provider, event.sessionId);
+    if (selectedSessionKeyRef.current !== targetKey) {
+      return;
+    }
+    sessionSelectionLoadRequestIdRef.current += 1;
+    const incoming: SessionProviderSelection = {
+      provider: event.provider,
+      sessionId: event.sessionId,
+      ...event.session.selection,
+    };
+    setSessionSelection((current) => (
+      current?.provider === event.provider && current.sessionId === event.sessionId
+        ? mergeSessionSelection(current, incoming)
+        : incoming
+    ));
+  }, []);
 
   /**
    * Applies a model choice.
@@ -591,40 +669,95 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       return { scope: 'default' as const, model };
     }
 
-    // A pending GET represents the state before this click and must not win
-    // if it resolves after the mutation.
     sessionSelectionLoadRequestIdRef.current += 1;
     const mutationId = sessionModelMutationIdRef.current + 1;
     sessionModelMutationIdRef.current = mutationId;
     const targetSessionKey = getSessionSelectionKey(targetProvider, normalizedSessionId);
+    const previousSelection = sessionSelection?.provider === targetProvider
+      && sessionSelection.sessionId === normalizedSessionId
+      ? sessionSelection
+      : null;
+    // Even sentinel choices stay locally sticky until the POST's ordered
+    // authoritative upsert has overtaken older provider events.
+    const modelDirty = targetProvider === 'omp';
 
-    const response = await api.providers.setSessionActiveModel(
-      targetProvider,
-      normalizedSessionId,
-      model,
-    );
-
-    const body = (await response.json()) as SessionSelectionApiResponse;
-    if (!response.ok || !body.success) {
-      throw new Error('Unable to change the active model for this session.');
-    }
-
-    const storedModel = body.data?.model?.trim() || model;
-    if (
-      sessionModelMutationIdRef.current === mutationId
-      && selectedSessionKeyRef.current === targetSessionKey
-    ) {
-      setSessionSelection((current) => ({
+    setSessionSelection((current) => {
+      const sameSession = current?.provider === targetProvider
+        && current.sessionId === normalizedSessionId;
+      return {
         provider: targetProvider,
         sessionId: normalizedSessionId,
-        model: storedModel,
-        effort: current?.provider === targetProvider && current.sessionId === normalizedSessionId
-          ? current.effort
-          : body.data?.effort?.trim() || null,
-      }));
+        model,
+        effort: sameSession ? current.effort : previousSelection?.effort ?? null,
+        liveModel: null,
+        liveEffort: sameSession ? current.liveEffort : previousSelection?.liveEffort ?? null,
+        modelDirty,
+        effortDirty: sameSession ? current.effortDirty : previousSelection?.effortDirty ?? false,
+      };
+    });
+
+    try {
+      const response = await api.providers.setSessionActiveModel(
+        targetProvider,
+        normalizedSessionId,
+        model,
+      );
+      const body = (await response.json()) as SessionSelectionApiResponse;
+      if (!response.ok || !body.success) {
+        throw new Error('Unable to change the active model for this session.');
+      }
+
+      const storedModel = body.data?.model?.trim() || model;
+      if (
+        sessionModelMutationIdRef.current === mutationId
+        && selectedSessionKeyRef.current === targetSessionKey
+      ) {
+        setSessionSelection((current) => {
+          const sameSession = current?.provider === targetProvider
+            && current.sessionId === normalizedSessionId;
+          const alreadyAcknowledged = sameSession
+            && !current.modelDirty
+            && current.liveModel === storedModel;
+          return {
+            provider: targetProvider,
+            sessionId: normalizedSessionId,
+            model: alreadyAcknowledged ? current.model : storedModel,
+            effort: sameSession ? current.effort : body.data?.effort?.trim() || null,
+            liveModel: alreadyAcknowledged ? current.liveModel : null,
+            liveEffort: sameSession ? current.liveEffort : body.data?.liveEffort?.trim() || null,
+            modelDirty: alreadyAcknowledged ? false : body.data?.modelDirty ?? modelDirty,
+            effortDirty: sameSession ? current.effortDirty : body.data?.effortDirty === true,
+          };
+        });
+      }
+      return { scope: 'session' as const, model: storedModel };
+    } catch (error) {
+      if (
+        sessionModelMutationIdRef.current === mutationId
+        && selectedSessionKeyRef.current === targetSessionKey
+      ) {
+        setSessionSelection((current) => {
+          if (
+            current?.provider !== targetProvider
+            || current.sessionId !== normalizedSessionId
+            || current.model !== model
+          ) {
+            return current;
+          }
+          const providerConfirmed = targetProvider === 'omp'
+            && !current.modelDirty
+            && current.liveModel === model;
+          return providerConfirmed ? current : {
+            ...current,
+            model: previousSelection?.model ?? null,
+            liveModel: previousSelection?.liveModel ?? null,
+            modelDirty: previousSelection?.modelDirty ?? false,
+          };
+        });
+      }
+      throw error;
     }
-    return { scope: 'session' as const, model: storedModel };
-  }, [setStoredProviderModel]);
+  }, [sessionSelection, setStoredProviderModel]);
 
   /**
    * Applies an effort choice optimistically and persists it for the open
@@ -652,11 +785,20 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       ? sessionSelection
       : null;
 
-    setSessionSelection({
-      provider: targetProvider,
-      sessionId: normalizedSessionId,
-      model: previousSelection?.model ?? null,
-      effort,
+    const effortDirty = targetProvider === 'omp';
+    setSessionSelection((current) => {
+      const sameSession = current?.provider === targetProvider
+        && current.sessionId === normalizedSessionId;
+      return {
+        provider: targetProvider,
+        sessionId: normalizedSessionId,
+        model: sameSession ? current.model : previousSelection?.model ?? null,
+        effort,
+        liveModel: sameSession ? current.liveModel : previousSelection?.liveModel ?? null,
+        liveEffort: null,
+        modelDirty: sameSession ? current.modelDirty : previousSelection?.modelDirty ?? false,
+        effortDirty,
+      };
     });
 
     try {
@@ -675,14 +817,23 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         sessionEffortMutationIdRef.current === mutationId
         && selectedSessionKeyRef.current === targetSessionKey
       ) {
-        setSessionSelection((current) => ({
-          provider: targetProvider,
-          sessionId: normalizedSessionId,
-          model: current?.provider === targetProvider && current.sessionId === normalizedSessionId
-            ? current.model
-            : previousSelection?.model ?? null,
-          effort: storedEffort,
-        }));
+        setSessionSelection((current) => {
+          const sameSession = current?.provider === targetProvider
+            && current.sessionId === normalizedSessionId;
+          const alreadyAcknowledged = sameSession
+            && !current.effortDirty
+            && current.liveEffort === storedEffort;
+          return {
+            provider: targetProvider,
+            sessionId: normalizedSessionId,
+            model: sameSession ? current.model : previousSelection?.model ?? null,
+            effort: alreadyAcknowledged ? current.effort : storedEffort,
+            liveModel: sameSession ? current.liveModel : previousSelection?.liveModel ?? null,
+            liveEffort: alreadyAcknowledged ? current.liveEffort : null,
+            modelDirty: sameSession ? current.modelDirty : previousSelection?.modelDirty ?? false,
+            effortDirty: alreadyAcknowledged ? false : body.data?.effortDirty ?? effortDirty,
+          };
+        });
       }
 
       return { scope: 'session' as const, effort: storedEffort };
@@ -691,33 +842,48 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         sessionEffortMutationIdRef.current === mutationId
         && selectedSessionKeyRef.current === targetSessionKey
       ) {
-        setSessionSelection((current) => (
-          current?.provider === targetProvider
-          && current.sessionId === normalizedSessionId
-          && current.effort === effort
-            ? previousSelection
-            : current
-        ));
+        setSessionSelection((current) => {
+          if (
+            current?.provider !== targetProvider
+            || current.sessionId !== normalizedSessionId
+            || current.effort !== effort
+          ) {
+            return current;
+          }
+          const providerConfirmed = targetProvider === 'omp'
+            && !current.effortDirty
+            && current.liveEffort === effort;
+          return providerConfirmed ? current : {
+            ...current,
+            effort: previousSelection?.effort ?? null,
+            liveEffort: previousSelection?.liveEffort ?? null,
+            effortDirty: previousSelection?.effortDirty ?? false,
+          };
+        });
       }
       throw error;
     }
   }, [sessionSelection, setStoredProviderEffort]);
 
-  // The open session's model wins over the per-provider default, so switching
-  // sessions shows (and sends) what each session actually runs with.
-  const currentProviderModel = sessionModel ?? providerModels[provider];
+  const sessionLiveModel = activeSessionSelection?.modelDirty
+    ? null
+    : activeSessionSelection?.liveModel ?? null;
+  const currentProviderModel = sessionLiveModel ?? sessionModel ?? providerModels[provider];
   const currentProviderEffortOptions = useMemo(() => {
     return getEffortOptionsForModel(provider, currentProviderModel);
   }, [currentProviderModel, getEffortOptionsForModel, provider]);
+  const sessionEffort = activeSessionSelection?.effortDirty
+    ? activeSessionSelection.effort
+    : activeSessionSelection?.liveEffort ?? activeSessionSelection?.effort;
   const currentProviderEffort = useMemo(() => {
     return reconcileStoredEffort(
       provider,
       currentProviderModel,
-      activeSessionSelection?.effort
+      sessionEffort
         ?? providerEfforts[provider]
         ?? DEFAULT_EFFORT_VALUE,
     );
-  }, [activeSessionSelection?.effort, currentProviderModel, provider, providerEfforts, reconcileStoredEffort]);
+  }, [currentProviderModel, provider, providerEfforts, reconcileStoredEffort, sessionEffort]);
   const currentProviderModelOptions = useMemo(
     () => providerModelCatalog[provider]?.OPTIONS ?? FALLBACK_MODEL_OPTIONS[provider] ?? [],
     [provider, providerModelCatalog],
@@ -843,6 +1009,8 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
+    applySessionUpsertedSelection,
+    refreshSessionSelection,
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,

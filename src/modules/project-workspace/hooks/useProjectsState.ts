@@ -2,12 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '@/shared/api';
-import type { ServerEvent,
+import type {
+  ServerEvent,
   AppTab,
   LLMProvider,
   LoadingProgress,
   Project,
-  ProjectSession,IsSessionProcessing } from '@/shared/types';
+  ProjectSession,
+  IsSessionProcessing,
+  SessionUpsertedEvent,
+} from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
 import { readSelectedProvider } from '@/shared/selectedProvider';
 
@@ -20,28 +24,6 @@ type UseProjectsStateArgs = {
   isSessionProcessing: IsSessionProcessing;
 };
 
-/**
- * Shape of the per-session sidebar delta (`kind: session_upserted`). It carries
- * everything needed to upsert one session row in place — no full project-list
- * snapshot is ever pushed.
- *
- * Produced on the wire by exactly one builder,
- * `server/modules/websocket/services/session-upsert-broadcast.service.ts`,
- * which both the on-disk sessions watcher and the chat run registry go through.
- */
-type SessionUpsertedEvent = ServerEvent & {
-  sessionId: string;
-  providerSessionId?: string | null;
-  provider: LLMProvider;
-  session: ProjectSession;
-  project: {
-    projectId: string;
-    path: string;
-    fullPath: string;
-    displayName: string;
-    isStarred: boolean;
-  } | null;
-};
 
 type FetchProjectsOptions = {
   showLoadingState?: boolean;
@@ -589,15 +571,23 @@ export function useProjectsState({
       __projectId: project.projectId,
     };
     // A purely local record that reuses the wire shape to feed
-    // `upsertSessionIntoProject`; it is never dispatched onto the socket. It
-    // deliberately carries no `providerSessionId` — the row was created moments
-    // ago by `POST /api/providers/sessions` and the provider has not reported
-    // an id yet, so there is nothing truthful to put there.
+    // `upsertSessionIntoProject`; it is never dispatched onto the socket.
     const upsert: SessionUpsertedEvent = {
       kind: 'session_upserted',
       sessionId: newSessionId,
+      providerSessionId: null,
       provider,
-      session: optimisticSession,
+      session: {
+        ...optimisticSession,
+        selection: {
+          model: null,
+          effort: null,
+          liveModel: null,
+          liveEffort: null,
+          modelDirty: false,
+          effortDirty: false,
+        },
+      },
       project: {
         projectId: project.projectId,
         path: project.path || project.fullPath,
@@ -831,10 +821,6 @@ export function useProjectsState({
         typeof upsert.providerSessionId === 'string' && upsert.providerSessionId !== upsert.sessionId
           ? upsert.providerSessionId
           : null;
-      if (!aliasedSelectedSessionId) {
-        return;
-      }
-
       const normalizedSelectedSession: ProjectSession = {
         ...upsert.session,
         id: upsert.sessionId,
@@ -843,17 +829,16 @@ export function useProjectsState({
       };
 
       setSelectedSession((previousSession) => {
-        if (previousSession?.id !== aliasedSelectedSessionId) {
+        if (
+          previousSession?.id !== upsert.sessionId
+          && previousSession?.id !== aliasedSelectedSessionId
+        ) {
           return previousSession;
         }
-
-        return {
-          ...previousSession,
-          ...normalizedSelectedSession,
-        };
+        return { ...previousSession, ...normalizedSelectedSession };
       });
 
-      if (sessionId === aliasedSelectedSessionId) {
+      if (aliasedSelectedSessionId && sessionId === aliasedSelectedSessionId) {
         navigate(`/session/${upsert.sessionId}`);
       }
     };

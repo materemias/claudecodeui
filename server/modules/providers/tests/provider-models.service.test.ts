@@ -22,27 +22,58 @@ const createCurrentActiveModel = (model: string): ProviderCurrentActiveModel => 
 const createSessionStore = (
   rows: Record<string, string | null> = {},
   efforts: Record<string, string | null> = {},
+  providers: Record<string, LLMProvider> = {},
 ) => {
   const sessions = new Map(Object.entries(rows).map(([sessionId, model]) => [
     sessionId,
-    { model, effort: efforts[sessionId] ?? null },
+    {
+      session_id: sessionId,
+      provider: providers[sessionId] ?? 'omp',
+      model,
+      effort: efforts[sessionId] ?? null,
+      live_model: null as string | null,
+      live_effort: null as string | null,
+      model_dirty: 0,
+      effort_dirty: 0,
+    },
   ]));
   return {
     sessions,
-    getSessionById: (sessionId: string) =>
-      sessions.get(sessionId) ?? null,
-    setSessionModel: (sessionId: string, model: string) => {
+    getSessionById: (sessionId: string) => sessions.get(sessionId) ?? null,
+    getSessionByProviderSessionId: (sessionId: string) => sessions.get(sessionId) ?? null,
+    setSessionModel: (sessionId: string, model: string, pending: boolean) => {
       const session = sessions.get(sessionId);
       if (session) {
         session.model = model;
+        session.live_model = null;
+        session.model_dirty = pending ? 1 : 0;
       }
     },
-    setSessionEffort: (sessionId: string, effort: string) => {
+    setSessionEffort: (sessionId: string, effort: string, pending: boolean) => {
       const session = sessions.get(sessionId);
       if (session) {
         session.effort = effort;
+        session.live_effort = null;
+        session.effort_dirty = pending ? 1 : 0;
       }
     },
+    recordSessionModelOnSend: (sessionId: string, model: string, pending: boolean) => {
+      const session = sessions.get(sessionId);
+      if (session && session.model !== model && session.live_model !== model) {
+        session.model = model;
+        session.live_model = null;
+        session.model_dirty = pending ? 1 : 0;
+      }
+    },
+    recordSessionEffortOnSend: (sessionId: string, effort: string, pending: boolean) => {
+      const session = sessions.get(sessionId);
+      if (session && session.effort !== effort && session.live_effort !== effort) {
+        session.effort = effort;
+        session.live_effort = null;
+        session.effort_dirty = pending ? 1 : 0;
+      }
+    },
+    applySessionConfigReport: () => false,
   };
 };
 
@@ -227,6 +258,10 @@ test('setSessionModel records the model on the session row', () => {
     sessionId: 'session-1',
     model: 'opus',
     effort: null,
+    liveModel: null,
+    liveEffort: null,
+    modelDirty: false,
+    effortDirty: false,
     source: 'session',
   });
   assert.equal(sessions.sessions.get('session-1')?.model, 'opus');
@@ -250,6 +285,8 @@ test('setSessionEffort records an explicit effort on the session row', () => {
     provider: 'codex',
     sessionId: 'session-1',
     effort: 'ultra',
+    liveEffort: null,
+    effortDirty: false,
     source: 'session',
   });
   assert.equal(sessions.sessions.get('session-1')?.effort, 'ultra');
