@@ -35,6 +35,7 @@ function renderBuffers(initialSessionId = 'viewed') {
     };
   };
   const statusCheckSentAtRef = { current: new Map<string, number>() };
+  const lastSeqRef = { current: new Map<string, number>() };
 
   const view = renderHook(
     ({ sessionId }: { sessionId: string }) => {
@@ -48,7 +49,7 @@ function renderBuffers(initialSessionId = 'viewed') {
         setTokenBudget: () => {},
         pendingPermissionRequests: [],
         setPendingPermissionRequests: () => {},
-        lastSeqRef: { current: new Map() },
+        lastSeqRef,
         statusCheckSentAtRef,
         requestLatestMessages: async () => {},
         sessionStore: store,
@@ -62,7 +63,7 @@ function renderBuffers(initialSessionId = 'viewed') {
     act(() => listener?.(message));
   };
 
-  return { ...view, dispatch, statusCheckSentAtRef };
+  return { ...view, dispatch, lastSeqRef, statusCheckSentAtRef };
 }
 
 beforeEach(() => {
@@ -102,7 +103,7 @@ describe('session-keyed realtime buffers', () => {
     assert.deepEqual(
       b.map(message => [message.kind, message.content, message.provider]),
       [
-        ['stream_delta', 'B1', 'omp'],
+        ['text', 'B1', 'omp'],
         ['thinking', 'think more', 'omp'],
       ],
     );
@@ -110,6 +111,125 @@ describe('session-keyed realtime buffers', () => {
     assert.equal(c.length, 1);
     assert.equal(c[0].kind, 'text');
     assert.equal(c[0].content, 'C1');
+  });
+
+  it('seals assistant rows at tool, status, error, and terminal boundaries per session', () => {
+    const { result, dispatch, lastSeqRef } = renderBuffers();
+
+    dispatch(event('stream_delta', 'A', 'omp', 'first', { seq: 1 }));
+    dispatch(event('stream_delta', 'B', 'omp', 'B1', { seq: 1 }));
+    dispatch(event('permission_request', 'B', 'omp', undefined, {
+      seq: 2,
+      requestId: 'permission-1',
+      toolName: 'Read',
+    }));
+    dispatch(event('tool_use', 'A', 'omp', undefined, {
+      seq: 2,
+      toolId: 'call-1',
+      toolName: 'Read',
+    }));
+    dispatch(event('stream_delta', 'A', 'omp', 'second', { seq: 3 }));
+    dispatch(event('tool_result', 'A', 'omp', 'result', { seq: 4, toolId: 'call-1' }));
+    dispatch(event('stream_delta', 'A', 'omp', 'third', { seq: 5 }));
+    dispatch(event('status', 'A', 'omp', undefined, { seq: 6, text: 'plan' }));
+    dispatch(event('stream_delta', 'A', 'omp', 'fourth', { seq: 7 }));
+    dispatch(event('error', 'A', 'omp', 'failed', { seq: 8 }));
+    dispatch(event('stream_delta', 'A', 'omp', 'fifth', { seq: 9 }));
+    dispatch(event('complete', 'A', 'omp', undefined, { seq: 10, aborted: true }));
+    dispatch(event('stream_delta', 'A', 'omp', 'sixth', { seq: 11 }));
+    dispatch(event('stream_delta', 'B', 'omp', 'B2', { seq: 3 }));
+    dispatch(event('stream_end', 'B', 'omp', undefined, { seq: 4 }));
+    act(() => vi.advanceTimersByTime(100));
+
+    assert.deepEqual(
+      result.current.getMessages('A').map(message => [message.kind, message.content]),
+      [
+        ['text', 'first'],
+        ['tool_use', undefined],
+        ['text', 'second'],
+        ['tool_result', 'result'],
+        ['text', 'third'],
+        ['text', 'fourth'],
+        ['error', 'failed'],
+        ['text', 'fifth'],
+        ['stream_delta', 'sixth'],
+      ],
+    );
+    assert.deepEqual(
+      result.current.getMessages('B').map(message => [message.kind, message.content]),
+      [['text', 'B1B2']],
+    );
+    assert.equal(lastSeqRef.current.get('A'), 11);
+    assert.equal(lastSeqRef.current.get('B'), 4);
+  });
+
+  it('reconciles each sealed assistant row with its persisted copy', async () => {
+    const { result, dispatch } = renderBuffers();
+    vi.setSystemTime(new Date('2026-09-01T10:00:00.000Z'));
+
+    dispatch(event('stream_delta', 'A', 'omp', 'first'));
+    dispatch(event('tool_use', 'A', 'omp', undefined, {
+      id: 'tool-live',
+      toolId: 'call-1',
+      toolName: 'Read',
+    }));
+    dispatch(event('stream_delta', 'A', 'omp', 'second'));
+    dispatch(event('complete', 'A', 'omp'));
+
+    const history = [
+      {
+        id: 'user-1',
+        sessionId: 'A',
+        provider: 'omp',
+        kind: 'text',
+        role: 'user',
+        content: 'question',
+        timestamp: '2026-09-01T09:00:00.000Z',
+      },
+      {
+        id: 'assistant-1',
+        sessionId: 'A',
+        provider: 'omp',
+        kind: 'text',
+        role: 'assistant',
+        content: 'first',
+        timestamp: '2026-09-01T09:00:01.000Z',
+      },
+      {
+        id: 'tool-1',
+        sessionId: 'A',
+        provider: 'omp',
+        kind: 'tool_use',
+        toolId: 'call-1',
+        toolName: 'Read',
+        timestamp: '2026-09-01T09:00:02.000Z',
+      },
+      {
+        id: 'assistant-2',
+        sessionId: 'A',
+        provider: 'omp',
+        kind: 'text',
+        role: 'assistant',
+        content: 'second',
+        timestamp: '2026-09-01T09:00:03.000Z',
+      },
+    ] as NormalizedMessage[];
+    sessionMessages.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { messages: history, total: history.length, hasMore: false },
+      }),
+    });
+
+    await act(async () => {
+      await result.current.fetchFromServer('A');
+    });
+
+    assert.deepEqual(
+      result.current.getMessages('A').map(message => message.id),
+      history.map(message => message.id),
+    );
+    assert.deepEqual(result.current.getSessionSlot('A')?.realtimeMessages, []);
   });
 
   it('preserves dirty rows across a session switch and listener re-subscribe', () => {

@@ -15,6 +15,17 @@ const hasActionablePermissionRequests = (requests: Array<{ toolName?: unknown }>
   return Array.isArray(requests) && requests.some((request) => isActionablePermissionRequest(request));
 };
 const FLUSH_INTERVAL_MS = 100;
+const STREAM_BOUNDARY_KINDS: Record<string, true> = {
+  thinking: true,
+  tool_use: true,
+  tool_result: true,
+  text: true,
+  task_notification: true,
+  status: true,
+  error: true,
+  stream_end: true,
+  complete: true,
+};
 
 type BufferedRow = {
   id: string;
@@ -263,6 +274,9 @@ export function useChatRealtimeHandlers({
 
         case 'protocol_error': {
           console.error('[Chat] Protocol error:', msg.code, msg.error);
+          if (typeof msg.sessionId === 'string' && msg.sessionId) {
+            endStream(msg.sessionId);
+          }
           if (sid) {
             // Surface the failure in the conversation and stop the spinner —
             // the run never started (or was rejected), so no `complete` follows.
@@ -298,6 +312,11 @@ export function useChatRealtimeHandlers({
       const eventProvider = typeof msg.provider === 'string'
         ? msg.provider as LLMProvider
         : null;
+      // A new provider row or lifecycle boundary seals the current assistant
+      // text. Permission frames can interleave inside one reply, so they do not.
+      if (eventSessionId && STREAM_BOUNDARY_KINDS[msg.kind]) {
+        endStream(eventSessionId);
+      }
 
       // OMP sends reasoning as small chunks. Other providers already send
       // complete thinking blocks, so they stay on the ordinary append path.
@@ -330,7 +349,6 @@ export function useChatRealtimeHandlers({
       }
 
       if (msg.kind === 'stream_end') {
-        if (eventSessionId) endStream(eventSessionId);
         return;
       }
 
@@ -349,10 +367,6 @@ export function useChatRealtimeHandlers({
       // --- UI side effects for specific kinds ---
       switch (msg.kind) {
         case 'complete': {
-          // Seal only this session. Another session may still have a dirty row
-          // waiting on the shared timer.
-          if (eventSessionId) endStream(eventSessionId);
-
           // `complete` is the unified terminal event — every provider run ends
           // with exactly one, regardless of success, failure, or abort. The
           // indicator derives from the processing map, so deleting the entry
