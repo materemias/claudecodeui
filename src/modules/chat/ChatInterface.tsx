@@ -271,6 +271,7 @@ function ChatInterface({
     statusCheckSentAtRef,
     onSessionProcessing,
     onSessionIdle,
+    onWebSocketReconnect: refreshSessionSelection,
     requestLatestMessages,
     sessionStore,
   });
