@@ -253,6 +253,9 @@
     "forkFromHere": "從此處分支"
   },
   "composer": {
+    "searchModels": "搜尋模型…",
+    "noModelMatches": "沒有符合「{{query}}」的模型",
+    "showMoreModels": "顯示更多模型",
     "editing": {
       "title": "正在取代先前的訊息",
       "filesNotReverted": "已修改的檔案不會還原",

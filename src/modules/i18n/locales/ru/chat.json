@@ -217,6 +217,9 @@
     "forkFromHere": "Ответвить отсюда"
   },
   "composer": {
+    "searchModels": "Поиск моделей…",
+    "noModelMatches": "Нет моделей, соответствующих запросу «{{query}}»",
+    "showMoreModels": "Показать больше моделей",
     "editing": {
       "title": "Замена предыдущего сообщения",
       "filesNotReverted": "уже изменённые файлы не возвращаются",

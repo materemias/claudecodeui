@@ -217,6 +217,9 @@
     "forkFromHere": "Dirama da qui"
   },
   "composer": {
+    "searchModels": "Cerca modelli…",
+    "noModelMatches": "Nessun modello corrisponde a «{{query}}»",
+    "showMoreModels": "Mostra altri modelli",
     "editing": {
       "title": "Sostituzione di un messaggio precedente",
       "filesNotReverted": "i file già modificati non vengono ripristinati",
