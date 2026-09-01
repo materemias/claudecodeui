@@ -272,9 +272,43 @@ async function resolveOmpImage(ref: OmpImageRef): Promise<{ data: string; mimeTy
   return null;
 }
 
+type OmpConfigOptionUpdate = {
+  configId: string;
+  value: string;
+};
+
 /**
- * Maps one ACP `session/update` notification to NormalizedMessage chunks.
- * One update yields at most one message.
+ * Parses the full-array and legacy scalar OMP config notification shapes.
+ *
+ * Used by both live message normalization and the runtime's persisted config
+ * state so the two paths cannot disagree about which value OMP reported.
+ */
+export function readOmpConfigOptionUpdates(params: AnyRecord): OmpConfigOptionUpdate[] {
+  const update = readObjectRecord(params.update);
+  if (!update || update.sessionUpdate !== 'config_option_update') {
+    return [];
+  }
+
+  const entries = Array.isArray(update.configOptions) ? update.configOptions : [];
+  const parsed = entries.flatMap((raw: unknown) => {
+    const entry = readObjectRecord(raw);
+    const configId = readOptionalString(entry?.id);
+    const value = readOptionalString(entry?.currentValue) ?? readOptionalString(entry?.value);
+    return configId && value ? [{ configId, value }] : [];
+  });
+  if (parsed.length > 0) {
+    return parsed;
+  }
+
+  const configId = readOptionalString(update.configId) ?? readOptionalString(update.id);
+  const value = readOptionalString(update.currentValue) ?? readOptionalString(update.value);
+  return configId && value ? [{ configId, value }] : [];
+}
+
+/**
+ * Maps one ACP `session/update` notification to normalized message chunks.
+ * Config updates may yield one status per option; other updates yield at most
+ * one message.
  */
 function normalizeAcpUpdate(params: AnyRecord, sessionId: string | null): NormalizedMessage[] {
   const update = readObjectRecord(params.update);
@@ -359,19 +393,26 @@ function normalizeAcpUpdate(params: AnyRecord, sessionId: string | null): Normal
     return [createNormalizedMessage({ ...base, kind: 'status', text: 'plan' })];
   }
 
-  // Live model/thinking/mode changes → status, so the UI can reflect them
-  // (parity with how other providers surface mid-session model changes). Pass
-  // configId through so the UI labels it correctly (Model vs Thinking vs Mode) —
-  // current_mode_update is always the mode.
-  if (kind === 'config_option_update' || kind === 'current_mode_update') {
-    const value = readOptionalString(update.currentValue)
-      ?? readOptionalString(update.value)
-      ?? readOptionalString(update.currentModeId)
+  // OMP v17.4 emits the full configOptions array on every change. Preserve one
+  // status per option; the runtime diffs them against its session baseline.
+  if (kind === 'config_option_update') {
+    return readOmpConfigOptionUpdates(params).map(({ configId, value }) =>
+      createNormalizedMessage({
+        ...base,
+        kind: 'status',
+        text: kind,
+        status: value,
+        configId,
+      }));
+  }
+
+  if (kind === 'current_mode_update') {
+    const value = readOptionalString(update.currentModeId)
+      ?? readOptionalString(update.currentValue)
       ?? readOptionalString(update.mode);
-    const configId = kind === 'current_mode_update'
-      ? 'mode'
-      : (readOptionalString(update.configId) ?? readOptionalString(update.id));
-    return [createNormalizedMessage({ ...base, kind: 'status', text: kind, status: value, configId })];
+    return value
+      ? [createNormalizedMessage({ ...base, kind: 'status', text: kind, status: value, configId: 'mode' })]
+      : [];
   }
 
   // available_commands_update / session_info_update carry no user-facing state.

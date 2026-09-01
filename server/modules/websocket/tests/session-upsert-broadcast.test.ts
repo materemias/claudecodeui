@@ -136,3 +136,48 @@ test('a closed socket is skipped', async () => {
     assert.deepEqual(closing.frames, []);
   });
 });
+
+test('one failed socket send cannot block the remaining clients', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-7', 'claude', '/workspace/demo');
+    const failed = {
+      readyState: 1, // WS_OPEN_STATE
+      send(): void {
+        throw new Error('socket closed during send');
+      },
+    };
+    const healthy = new FakeConnection();
+    connectedClients.add(failed as never);
+    connectedClients.add(healthy as never);
+
+    await broadcastSessionUpserted('app-7');
+
+    assert.equal(healthy.frames.length, 1);
+  });
+});
+
+test('concurrent producers cannot publish an older selection after a provider acknowledgement', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-config', 'omp', '/workspace/demo');
+    sessionsDb.setSessionModel('app-config', 'zai/glm-5.3', true);
+
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    const mappingBroadcast = broadcastSessionUpserted('app-config');
+    await Promise.resolve();
+    sessionsDb.applySessionConfigReport('app-config', {
+      source: 'live',
+      updates: [{ field: 'model', value: 'zai/glm-5.3' }],
+    });
+    const acknowledgementBroadcast = broadcastSessionUpserted('app-config');
+    await Promise.all([mappingBroadcast, acknowledgementBroadcast]);
+
+    assert.equal(connection.frames.length, 2);
+    const finalSession = connection.frames.at(-1)?.session as {
+      selection?: { liveModel?: string | null; modelDirty?: boolean };
+    };
+    assert.equal(finalSession.selection?.liveModel, 'zai/glm-5.3');
+    assert.equal(finalSession.selection?.modelDirty, false);
+  });
+});

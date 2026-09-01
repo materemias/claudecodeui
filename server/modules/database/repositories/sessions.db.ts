@@ -1,10 +1,11 @@
 import { getConnection } from '@/modules/database/connection.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
+import type { ProviderSessionConfigReport } from '@/shared/types.js';
 
 type SessionNameSource = 'provisional' | 'provider' | 'user';
 
-type SessionRow = {
+export type SessionRow = {
   session_id: string;
   provider: string;
   provider_session_id: string | null;
@@ -15,10 +16,18 @@ type SessionRow = {
   name_source: SessionNameSource | null;
   /** Last title read from provider storage. */
   provider_name: string | null;
-  /** Model this session runs with; NULL until the app records one for it. */
+  /** Model explicitly selected for this session; NULL until one is recorded. */
   model: string | null;
-  /** Reasoning effort this session runs with; NULL until the app records one. */
+  /** Reasoning effort explicitly selected for this session. */
   effort: string | null;
+  /** Latest model reported by the provider itself. */
+  live_model: string | null;
+  /** Latest reasoning effort reported by the provider itself. */
+  live_effort: string | null;
+  /** 1 while `model` is waiting for a matching provider report. */
+  model_dirty: number;
+  /** 1 while `effort` is waiting for a matching provider report. */
+  effort_dirty: number;
   /** The app session this one was branched from; NULL unless it is a fork. */
   forked_from_session_id: string | null;
   isArchived: number;
@@ -32,7 +41,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, name_source, provider_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, name_source, provider_name, model, effort, live_model, live_effort, model_dirty, effort_dirty, forked_from_session_id, isArchived, created_at, updated_at';
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -313,7 +322,13 @@ export const sessionsDb = {
    */
   repointSessionToProviderSession(
     sessionId: string,
-    input: { providerSessionId: string; jsonlPath: string | null },
+    input: {
+      providerSessionId: string;
+      jsonlPath: string | null;
+      resetLiveConfig?: boolean;
+      rearmModel?: boolean;
+      rearmEffort?: boolean;
+    },
   ): void {
     const db = getConnection();
 
@@ -334,11 +349,19 @@ export const sessionsDb = {
         `UPDATE sessions SET
            provider_session_id = ?,
            jsonl_path = ?,
+           live_model = CASE WHEN ? THEN NULL ELSE live_model END,
+           live_effort = CASE WHEN ? THEN NULL ELSE live_effort END,
+           model_dirty = CASE WHEN ? THEN 1 ELSE model_dirty END,
+           effort_dirty = CASE WHEN ? THEN 1 ELSE effort_dirty END,
            updated_at = CURRENT_TIMESTAMP
          WHERE session_id = ?`
       ).run(
         input.providerSessionId,
         input.jsonlPath ?? indexedReplacement?.jsonl_path ?? null,
+        input.resetLiveConfig ? 1 : 0,
+        input.resetLiveConfig ? 1 : 0,
+        input.rearmModel ? 1 : 0,
+        input.rearmEffort ? 1 : 0,
         sessionId,
       );
     })();
@@ -351,15 +374,22 @@ export const sessionsDb = {
    * Used when an edit replaces the very first prompt: there is no conversation
    * left to branch from, so the session starts over instead.
    */
-  detachProviderSession(sessionId: string): void {
+  detachProviderSession(
+    sessionId: string,
+    rearm: { model?: boolean; effort?: boolean } = {},
+  ): void {
     const db = getConnection();
     db.prepare(
       `UPDATE sessions SET
          provider_session_id = NULL,
          jsonl_path = NULL,
+         live_model = NULL,
+         live_effort = NULL,
+         model_dirty = CASE WHEN ? THEN 1 ELSE model_dirty END,
+         effort_dirty = CASE WHEN ? THEN 1 ELSE effort_dirty END,
          updated_at = CURRENT_TIMESTAMP
        WHERE session_id = ?`
-    ).run(sessionId);
+    ).run(rearm.model ? 1 : 0, rearm.effort ? 1 : 0, sessionId);
   },
 
   /**
@@ -432,34 +462,100 @@ export const sessionsDb = {
   },
 
   /**
-   * Records the model one session runs with.
+   * Records an explicit model choice and retires the preceding live report.
    *
-   * Called both when the user picks a model for the session and on every send,
-   * so the row always reflects what the session last ran with and reopening it
-   * restores that model instead of a catalog default.
+   * `pending` is true only for a provider option that needs an acknowledgement.
+   * The OMP configured-model sentinel therefore records with `pending=false`.
    */
-  setSessionModel(sessionId: string, model: string): void {
+  setSessionModel(sessionId: string, model: string, pending = true): void {
     const db = getConnection();
     db.prepare(
       `UPDATE sessions
-       SET model = ?
+       SET model = ?, live_model = NULL, model_dirty = ?
        WHERE session_id = ?`
-    ).run(model, sessionId);
+    ).run(model, pending ? 1 : 0, sessionId);
+  },
+
+  /** Records an explicit effort choice with the same sticky semantics as model. */
+  setSessionEffort(sessionId: string, effort: string, pending = true): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET effort = ?, live_effort = NULL, effort_dirty = ?
+       WHERE session_id = ?`
+    ).run(effort, pending ? 1 : 0, sessionId);
   },
 
   /**
-   * Records the reasoning effort one session runs with.
+   * Records the model echoed by `chat.send` only when it is a new choice.
    *
-   * `default` is stored as an explicit choice rather than NULL so reopening
-   * the session does not inherit a later per-provider effort preference.
+   * A value equal to `live_model` is the provider's own state reflected by the
+   * composer, not a new pin, so it must not become dirty again.
    */
-  setSessionEffort(sessionId: string, effort: string): void {
+  recordSessionModelOnSend(sessionId: string, model: string, pending: boolean): void {
     const db = getConnection();
     db.prepare(
       `UPDATE sessions
-       SET effort = ?
-       WHERE session_id = ?`
-    ).run(effort, sessionId);
+       SET model = ?, live_model = NULL, model_dirty = ?
+       WHERE session_id = ?
+         AND (model IS NULL OR model <> ?)
+         AND (live_model IS NULL OR live_model <> ?)`
+    ).run(model, pending ? 1 : 0, sessionId, model, model);
+  },
+
+  /** Send-path counterpart of `recordSessionModelOnSend` for reasoning effort. */
+  recordSessionEffortOnSend(sessionId: string, effort: string, pending: boolean): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET effort = ?, live_effort = NULL, effort_dirty = ?
+       WHERE session_id = ?
+         AND (effort IS NULL OR effort <> ?)
+         AND (live_effort IS NULL OR live_effort <> ?)`
+    ).run(effort, pending ? 1 : 0, sessionId, effort, effort);
+  },
+
+  /**
+   * Applies one ordered provider config report atomically.
+   *
+   * A live mismatch is ignored while its option is dirty. A matching report
+   * stores the provider value and clears only that option's dirty flag.
+   * Snapshots acknowledge matching dirty choices but never overwrite clean
+   * live state, because an OMP load snapshot can name a primary model while the
+   * running session remains on a fallback.
+   */
+  applySessionConfigReport(sessionId: string, report: ProviderSessionConfigReport): boolean {
+    const db = getConnection();
+    return db.transaction(() => {
+      let changed = false;
+      for (const update of report.updates) {
+        const isModel = update.field === 'model';
+        const liveColumn = isModel ? 'live_model' : 'live_effort';
+        const valueColumn = isModel ? 'model' : 'effort';
+        const dirtyColumn = isModel ? 'model_dirty' : 'effort_dirty';
+        const result = report.source === 'snapshot'
+          ? db.prepare(
+              `UPDATE sessions
+               SET ${liveColumn} = ?, ${dirtyColumn} = 0
+               WHERE session_id = ?
+                 AND ${dirtyColumn} = 1
+                 AND ${valueColumn} = ?`
+            ).run(update.value, sessionId, update.value)
+          : db.prepare(
+              `UPDATE sessions
+               SET ${liveColumn} = ?,
+                   ${dirtyColumn} = CASE
+                     WHEN ${dirtyColumn} = 1 AND ${valueColumn} = ? THEN 0
+                     ELSE ${dirtyColumn}
+                   END
+               WHERE session_id = ?
+                 AND (${dirtyColumn} = 0 OR ${valueColumn} = ?)
+                 AND (${liveColumn} IS NULL OR ${liveColumn} <> ? OR ${dirtyColumn} = 1)`
+            ).run(update.value, update.value, sessionId, update.value, update.value);
+        changed ||= result.changes > 0;
+      }
+      return changed;
+    })();
   },
 
   /**

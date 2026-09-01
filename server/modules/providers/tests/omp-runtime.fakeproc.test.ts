@@ -111,6 +111,12 @@ async function runFakeTurn({ allow = true, permissionMode = 'default' } = {}) {
     normalizeMessage: (raw, sid) => ompSessions.normalizeMessage(raw, sid),
     resolveProviderSessionId: (sid) => sid ?? null,
     resolveResumeModel: async () => undefined,
+    readPendingSessionSelection: () => ({
+      sessionExists: false,
+      model: { pending: false, value: null },
+      effort: { pending: false, value: null },
+    }),
+    recordSessionConfigReport: async () => undefined,
     getProviderModels: async () => ({ OPTIONS: [], DEFAULT: '' }),
     isProviderInstalled: async () => true,
   };
@@ -211,6 +217,12 @@ test('a session changed on disk by another omp process resumes on a fresh child'
     normalizeMessage: (raw, sid) => ompSessions.normalizeMessage(raw, sid),
     resolveProviderSessionId: (sid) => sid ?? null,
     resolveResumeModel: async () => undefined,
+    readPendingSessionSelection: () => ({
+      sessionExists: false,
+      model: { pending: false, value: null },
+      effort: { pending: false, value: null },
+    }),
+    recordSessionConfigReport: async () => undefined,
     getProviderModels: async () => ({ OPTIONS: [], DEFAULT: '' }),
     isProviderInstalled: async () => true,
   };

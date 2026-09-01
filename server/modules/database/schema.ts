@@ -139,11 +139,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     provider_name TEXT,
     project_path TEXT,
     jsonl_path TEXT,
-    -- Model and reasoning effort this session runs with. Written when the user
-    -- changes either selection and on every send, so reopening a session
-    -- restores its exact runtime configuration instead of provider defaults.
+    -- model/effort are the user's persisted choices. live_model/live_effort
+    -- are the latest values the provider reported for this session. A dirty
+    -- flag keeps an explicit choice authoritative until a matching provider
+    -- report confirms it.
     model TEXT,
     effort TEXT,
+    live_model TEXT,
+    live_effort TEXT,
+    model_dirty BOOLEAN DEFAULT 0,
+    effort_dirty BOOLEAN DEFAULT 0,
     -- The app session this one was branched from, NULL for sessions created
     -- normally. Informational only: a fork is a fully independent provider
     -- session, and deleting the source does not affect it.

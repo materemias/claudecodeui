@@ -36,6 +36,7 @@ const renderHandlers = () => {
     lastSeqRef: { current: new Map() },
     statusCheckSentAtRef: { current: new Map() },
     requestLatestMessages: async () => {},
+    applySessionUpsertedSelection: () => {},
     sessionStore: {} as SessionStore,
   }));
 

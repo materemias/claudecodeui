@@ -1,22 +1,41 @@
 import { providerModelsDb, sessionsDb } from '@/modules/database/index.js';
+import { OMP_CONFIGURED_MODEL_SENTINEL } from '@/modules/providers/list/omp/omp-models.provider.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import type { IProvider } from '@/shared/interfaces.js';
 import type {
   CustomProviderModelInput,
   CustomProviderModelRecord,
   LLMProvider,
+  PendingProviderSessionSelection,
   ProviderCurrentActiveModel,
   ProviderModelOption,
   ProviderModelsDefinition,
+  ProviderSessionConfigReport,
   ProviderSessionModel,
+  ProviderSessionSelectionSnapshot,
 } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
 
 /** Session-row access the service needs, narrowed so tests can stub it. */
+type ProviderModelsSessionRow = {
+  session_id: string;
+  provider: string;
+  model: string | null;
+  effort: string | null;
+  live_model: string | null;
+  live_effort: string | null;
+  model_dirty: number;
+  effort_dirty: number;
+};
+
 type ProviderModelsSessionStore = {
-  getSessionById(sessionId: string): { model: string | null; effort: string | null } | null;
-  setSessionModel(sessionId: string, model: string): void;
-  setSessionEffort(sessionId: string, effort: string): void;
+  getSessionById(sessionId: string): ProviderModelsSessionRow | null;
+  getSessionByProviderSessionId(sessionId: string): ProviderModelsSessionRow | null;
+  setSessionModel(sessionId: string, model: string, pending: boolean): void;
+  setSessionEffort(sessionId: string, effort: string, pending: boolean): void;
+  recordSessionModelOnSend(sessionId: string, model: string, pending: boolean): void;
+  recordSessionEffortOnSend(sessionId: string, effort: string, pending: boolean): void;
+  applySessionConfigReport(sessionId: string, report: ProviderSessionConfigReport): boolean;
 };
 
 /** SQLite catalog operations used by the Providers service and its unit fakes. */
@@ -213,7 +232,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
 
   const readRecordedSessionSelection = (
     sessionId: string,
-  ): { model: string | null; effort: string | null } | null => {
+  ): ProviderSessionSelectionSnapshot | null => {
     const session = sessions.getSessionById(sessionId);
     if (!session) {
       return null;
@@ -222,17 +241,19 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     return {
       model: session.model?.trim() || null,
       effort: session.effort?.trim() || null,
+      liveModel: session.live_model?.trim() || null,
+      liveEffort: session.live_effort?.trim() || null,
+      modelDirty: session.model_dirty === 1,
+      effortDirty: session.effort_dirty === 1,
     };
   };
 
   /**
-   * Records the model one session runs with.
+   * Records an explicit model choice for one session.
    *
-   * Called from the active-model route when the user picks a model and from
-   * `chat.send` on every turn, so the row always matches what the session last
-   * ran with. Sessions the app has not created yet (no row) are ignored rather
-   * than treated as an error: the client keeps its own pending selection and
-   * the value lands on the row with the first send.
+   * OMP concrete models remain dirty until OMP reports the same value. Its
+   * configured-model sentinel is app-only and therefore has nothing for OMP
+   * to acknowledge.
    */
   const setSessionModel = (
     provider: LLMProvider,
@@ -250,28 +271,27 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       return null;
     }
 
-    sessions.setSessionModel(normalizedSessionId, normalizedModel);
+    const modelDirty = provider === 'omp' && normalizedModel !== OMP_CONFIGURED_MODEL_SENTINEL;
+    sessions.setSessionModel(normalizedSessionId, normalizedModel, modelDirty);
     return {
       provider,
       sessionId: normalizedSessionId,
       model: normalizedModel,
       effort: recordedSelection.effort,
+      liveModel: null,
+      liveEffort: recordedSelection.liveEffort,
+      modelDirty,
+      effortDirty: recordedSelection.effortDirty,
       source: 'session',
     };
   };
 
-  /**
-   * Records the reasoning effort one session runs with.
-   *
-   * Like `setSessionModel`, this ignores an id that has not been allocated by
-   * the session gateway yet. The websocket send path records it once the row
-   * exists, so a pre-session composer choice is not lost.
-   */
+  /** Records an explicit effort choice with the same OMP acknowledgement rule. */
   const setSessionEffort = (
     provider: LLMProvider,
     sessionId: string,
     effort: string,
-  ): { provider: LLMProvider; sessionId: string; effort: string; source: 'session' } | null => {
+  ): (Pick<ProviderSessionModel, 'provider' | 'sessionId' | 'effort' | 'liveEffort' | 'effortDirty' | 'source'>) | null => {
     const normalizedSessionId = sessionId.trim();
     const normalizedEffort = effort.trim();
     if (!normalizedSessionId || !normalizedEffort) {
@@ -282,23 +302,85 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       return null;
     }
 
-    sessions.setSessionEffort(normalizedSessionId, normalizedEffort);
+    const effortDirty = provider === 'omp' && normalizedEffort !== 'default';
+    sessions.setSessionEffort(normalizedSessionId, normalizedEffort, effortDirty);
     return {
       provider,
       sessionId: normalizedSessionId,
       effort: normalizedEffort,
+      liveEffort: null,
+      effortDirty,
       source: 'session',
     };
   };
 
   /**
+   * Records the composer's repeated send values without turning provider echoes
+   * into new explicit choices.
+   */
+  const recordSessionSelectionOnSend = (
+    provider: LLMProvider,
+    sessionId: string,
+    selection: { model?: string | null; effort?: string | null },
+  ): void => {
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId) {
+      return;
+    }
+    const model = typeof selection.model === 'string' ? selection.model.trim() : '';
+    const effort = typeof selection.effort === 'string' ? selection.effort.trim() : '';
+    if (model) {
+      sessions.recordSessionModelOnSend(
+        normalizedSessionId,
+        model,
+        provider === 'omp' && model !== OMP_CONFIGURED_MODEL_SENTINEL,
+      );
+    }
+    if (effort) {
+      sessions.recordSessionEffortOnSend(
+        normalizedSessionId,
+        effort,
+        provider === 'omp' && effort !== 'default',
+      );
+    }
+  };
+
+  /** Returns only choices that still require a provider acknowledgement. */
+  const readPendingSessionSelection = (sessionId: string): PendingProviderSessionSelection => {
+    const selection = readRecordedSessionSelection(sessionId.trim());
+    const model = selection?.modelDirty && selection.model
+      ? { pending: true as const, value: selection.model }
+      : { pending: false as const, value: selection?.model ?? null };
+    const effort = selection?.effortDirty && selection.effort
+      ? { pending: true as const, value: selection.effort }
+      : { pending: false as const, value: selection?.effort ?? null };
+    return { sessionExists: selection !== null, model, effort };
+  };
+
+  /**
+   * Applies one provider report to the mapped session and returns the app id
+   * when the stored selection changed.
+   */
+  const recordProviderSessionConfig = (
+    provider: LLMProvider,
+    appSessionId: string | null | undefined,
+    providerSessionId: string,
+    report: ProviderSessionConfigReport,
+  ): string | null => {
+    const row = (appSessionId ? sessions.getSessionById(appSessionId) : null)
+      ?? sessions.getSessionByProviderSessionId(providerSessionId);
+    if (!row || row.provider !== provider) {
+      return null;
+    }
+    return sessions.applySessionConfigReport(row.session_id, report) ? row.session_id : null;
+  };
+
+  /**
    * Answers "which model is this session using?" for every display surface.
    *
-   * Precedence, highest first:
-   *   1. the model recorded on the session row;
-   *   2. the provider's own session state for externally-created sessions;
-   *   3. `requestedModel`, the client's current default;
-   *   4. the source-controlled provider catalog default.
+   * The persisted pin remains in `model`, while `liveModel` and `liveEffort`
+   * carry confirmed provider state. A pending choice has no live value because
+   * the write retires the preceding report.
    */
   const resolveSessionModel = async (
     provider: LLMProvider,
@@ -310,14 +392,23 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       : '';
 
     if (normalizedSessionId) {
-      const recordedSelection = readRecordedSessionSelection(normalizedSessionId);
-      if (recordedSelection?.model) {
+      const recorded = readRecordedSessionSelection(normalizedSessionId);
+      if (recorded?.model) {
         return {
           provider,
           sessionId: normalizedSessionId,
-          model: recordedSelection.model,
-          effort: recordedSelection.effort,
+          ...recorded,
+          model: recorded.model,
           source: 'session',
+        };
+      }
+      if (recorded?.liveModel) {
+        return {
+          provider,
+          sessionId: normalizedSessionId,
+          ...recorded,
+          model: recorded.liveModel,
+          source: 'provider',
         };
       }
 
@@ -329,7 +420,11 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
           provider,
           sessionId: normalizedSessionId,
           model: resolvedProviderModel,
-          effort: recordedSelection?.effort ?? null,
+          effort: recorded?.effort ?? null,
+          liveModel: resolvedProviderModel,
+          liveEffort: recorded?.liveEffort ?? null,
+          modelDirty: false,
+          effortDirty: recorded?.effortDirty ?? false,
           source: 'provider',
         };
       }
@@ -338,7 +433,11 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
         provider,
         sessionId: normalizedSessionId,
         model: normalizedRequestedModel || providerCatalog.DEFAULT,
-        effort: recordedSelection?.effort ?? null,
+        effort: recorded?.effort ?? null,
+        liveModel: null,
+        liveEffort: recorded?.liveEffort ?? null,
+        modelDirty: false,
+        effortDirty: recorded?.effortDirty ?? false,
         source: normalizedRequestedModel ? 'session' : 'default',
       };
     }
@@ -349,6 +448,10 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
         sessionId: null,
         model: normalizedRequestedModel,
         effort: null,
+        liveModel: null,
+        liveEffort: null,
+        modelDirty: false,
+        effortDirty: false,
         source: 'session',
       };
     }
@@ -359,6 +462,10 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       sessionId: null,
       model: providerCatalog.DEFAULT,
       effort: null,
+      liveModel: null,
+      liveEffort: null,
+      modelDirty: false,
+      effortDirty: false,
       source: 'default',
     };
   };
@@ -392,6 +499,9 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     deleteCustomModel,
     setSessionModel,
     setSessionEffort,
+    recordSessionSelectionOnSend,
+    readPendingSessionSelection,
+    recordProviderSessionConfig,
     resolveSessionModel,
     resolveResumeModel,
   };

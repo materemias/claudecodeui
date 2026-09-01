@@ -13,6 +13,7 @@ import {
   readOptionalString,
 } from '@/shared/utils.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
+import type { ProviderSessionConfigUpdate } from '@/shared/types.js';
 
 type ParsedSession = {
   sessionId: string;
@@ -27,6 +28,8 @@ type ParsedSession = {
 };
 
 const UNTITLED = 'Untitled omp Session';
+const MAIN_MODEL_ROLES = new Set(['default', 'temporary', 'fallback']);
+const REPLACED_MODEL_STOP_REASON = 'error';
 
 // omp asks its title model for this wrapper. A failed extraction can persist
 // the opening tag by itself, so remove wrappers from auto-generated titles.
@@ -180,6 +183,13 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
       }
     }
 
+    const liveConfig = await this.deriveLiveConfig(filePath);
+    if (liveConfig.length > 0) {
+      sessionsDb.applySessionConfigReport(rowSessionId, {
+        source: 'live',
+        updates: liveConfig,
+      });
+    }
     return rowSessionId;
   }
 
@@ -265,5 +275,90 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
       titleSource,
       provisionalSessionName,
     };
+  }
+
+  /**
+   * Derives the latest main-model and thinking-level reports from OMP history.
+   *
+   * Role-specific model bindings are not the session's active model. Assistant
+   * records fill the gap when a terminal switch writes only a bare model id.
+   * Failed attempts are skipped because OMP may replace them with a fallback in
+   * the same turn.
+   */
+  private async deriveLiveConfig(filePath: string): Promise<ProviderSessionConfigUpdate[]> {
+    let lineNumber = 0;
+    let lastMainModel: { line: number; value: string } | null = null;
+    let lastAssistantModel: { line: number; value: string } | null = null;
+    let liveEffort: string | null = null;
+    const prefixedModelByBareId = new Map<string, string>();
+
+    const stream = fs.createReadStream(filePath);
+    const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        lineNumber += 1;
+        let entry: Record<string, unknown> | null;
+        try {
+          entry = readObjectRecord(JSON.parse(line));
+        } catch {
+          continue;
+        }
+        if (!entry) {
+          continue;
+        }
+
+        if (entry.type === 'model_change') {
+          const model = readOptionalString(entry.model);
+          if (!model) {
+            continue;
+          }
+          if (model.includes('/')) {
+            prefixedModelByBareId.set(model.slice(model.lastIndexOf('/') + 1), model);
+          }
+          const role = readOptionalString(entry.role);
+          if (!role || MAIN_MODEL_ROLES.has(role)) {
+            lastMainModel = { line: lineNumber, value: model };
+          }
+          continue;
+        }
+
+        if (entry.type === 'thinking_level_change') {
+          liveEffort = readOptionalString(entry.level)
+            ?? readOptionalString(entry.thinking)
+            ?? readOptionalString(entry.value)
+            ?? liveEffort;
+          continue;
+        }
+
+        if (entry.type !== 'message') {
+          continue;
+        }
+        const message = readObjectRecord(entry.message);
+        const model = readOptionalString(message?.model);
+        if (
+          message?.role === 'assistant'
+          && model
+          && readOptionalString(message.stopReason) !== REPLACED_MODEL_STOP_REASON
+        ) {
+          lastAssistantModel = { line: lineNumber, value: model };
+        }
+      }
+    } catch {
+      return [];
+    } finally {
+      lines.close();
+      stream.destroy();
+    }
+
+    const latestModel = lastMainModel && lastAssistantModel
+      ? (lastMainModel.line > lastAssistantModel.line ? lastMainModel.value : lastAssistantModel.value)
+      : (lastMainModel?.value ?? lastAssistantModel?.value ?? null);
+    const liveModel = latestModel?.includes('/')
+      ? latestModel
+      : (latestModel ? prefixedModelByBareId.get(latestModel) ?? null : null);
+    return [
+      ...(liveModel ? [{ field: 'model' as const, value: liveModel }] : []),
+      ...(liveEffort ? [{ field: 'effort' as const, value: liveEffort }] : []),
+    ];
   }
 }

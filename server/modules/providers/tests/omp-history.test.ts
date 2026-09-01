@@ -713,4 +713,67 @@ describe('omp synchronizer + fetchHistory', () => {
 
     closeConnection();
   });
+  it('normalizes full-array model and thinking config updates', async () => {
+    const { OmpSessionsProvider } = await import('@/modules/providers/list/omp/omp-sessions.provider.js');
+    const provider = new OmpSessionsProvider();
+    const messages = provider.normalizeMessage({
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions: [
+          { id: 'mode', currentValue: 'default' },
+          { id: 'model', currentValue: 'zai/glm-5.3' },
+          { id: 'thinking', currentValue: 'high' },
+        ],
+      },
+    }, 'live-session');
+
+    assert.deepEqual(
+      messages.map((message) => [message.configId, message.status]),
+      [
+        ['mode', 'default'],
+        ['model', 'zai/glm-5.3'],
+        ['thinking', 'high'],
+      ],
+    );
+  });
+
+  it('hydrates live model and effort from history without replacing pending choices', async () => {
+    const { closeConnection, initializeDatabase, sessionsDb } = await import('@/modules/database/index.js');
+    const { OmpSessionSynchronizer } = await import('@/modules/providers/list/omp/omp-session-synchronizer.provider.js');
+    closeConnection();
+    await initializeDatabase();
+
+    const sessionId = 'live-config-history';
+    const historyPath = path.join(
+      tempHome,
+      '.omp',
+      'agent',
+      'sessions',
+      '-work-omp-proj',
+      `2026-07-21T05-00-00-000Z_${sessionId}.jsonl`,
+    );
+    const lines = [
+      { type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-21T05:00:00.000Z' },
+      { type: 'model_change', model: 'zai/glm-5.3' },
+      { type: 'model_change', model: 'openai-codex/gpt-5.6-luna', role: 'smol' },
+      { type: 'message', id: 'a1', message: { role: 'assistant', model: 'gpt-5.6-luna', content: [] } },
+      { type: 'thinking_level_change', level: 'high' },
+    ];
+    await writeFile(historyPath, lines.map((line) => JSON.stringify(line)).join('\n') + '\n');
+
+    const synchronizer = new OmpSessionSynchronizer();
+    await synchronizer.synchronizeFile(historyPath);
+    let row = sessionsDb.getSessionById(sessionId);
+    assert.equal(row?.live_model, 'openai-codex/gpt-5.6-luna');
+    assert.equal(row?.live_effort, 'high');
+
+    sessionsDb.setSessionModel(sessionId, 'anthropic/claude-opus-5', true);
+    sessionsDb.setSessionEffort(sessionId, 'max', true);
+    await synchronizer.synchronizeFile(historyPath);
+    row = sessionsDb.getSessionById(sessionId);
+    assert.equal(row?.live_model, null);
+    assert.equal(row?.live_effort, null);
+    assert.equal(row?.model_dirty, 1);
+    assert.equal(row?.effort_dirty, 1);
+  });
 });
