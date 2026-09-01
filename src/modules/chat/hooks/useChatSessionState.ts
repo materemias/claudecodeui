@@ -471,7 +471,7 @@ export function useChatSessionState({
 
       try {
         const result = await sessionStore.fetchMore(selectedSession.id, {
-          limit: SESSION_MESSAGES_PAGE_SIZE,
+          limit: 80,
           canRequest: () => (
             isActiveRef.current
             && activeSessionIdRef.current === selectedSession.id
@@ -499,7 +499,7 @@ export function useChatSessionState({
         }
 
         pendingScrollRestoreRef.current = scrollRestoreState;
-        setVisibleMessageCount((prev) => prev + SESSION_MESSAGES_PAGE_SIZE);
+        setVisibleMessageCount((prev) => prev + prependedCount);
         if (!slot.hasMore) {
           allMessagesLoadedRef.current = true;
           setAllMessagesLoaded(true);
