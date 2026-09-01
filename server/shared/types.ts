@@ -73,7 +73,8 @@ export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'omp';
  *
  * Processing rows belong to CloudCLI's runtime and remain interruptible through
  * their chat run. Terminal rows are status-only observations of an external CLI.
- * Recent rows are completed Web UI runs retained for sidebar discovery.
+ * Recent rows are completed Web UI runs retained for sidebar discovery. Any variant
+ * may mark a transient one-shot run that clients should omit from persistent lists.
  */
 export type RunningSession =
   | {
@@ -82,12 +83,14 @@ export type RunningSession =
       source: 'processing';
       startedAt: number;
       lastSeq: number;
+      isOneShot?: boolean;
     }
   | {
       sessionId: string;
       provider: LLMProvider;
       source: 'terminal';
       lastSeq: 0;
+      isOneShot?: boolean;
     }
   | {
       sessionId: string;
@@ -98,6 +101,7 @@ export type RunningSession =
       lastActivity: string | null;
       completedAt: number;
       lastSeq: 0;
+      isOneShot?: boolean;
     };
 
 /**

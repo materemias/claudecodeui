@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import type { ReactNode } from 'react';
@@ -13,7 +14,6 @@ import {
 } from '@/shared/hooks/useSessionProtection';
 import type {
   IsSessionProcessing,
-  LLMProvider,
   MarkSessionIdle,
   MarkSessionProcessing,
   RecentWebSession,
@@ -26,6 +26,7 @@ import type {
   TerminalRunningSessionMap,
 } from '@/shared/types';
 import { api } from '@/shared/api';
+import { parseLLMProvider } from '@/shared/utils';
 
 type RunningSessionsApiPayload = {
   data?: {
@@ -38,6 +39,7 @@ type SessionProtectionActions = {
   markSessionIdle: MarkSessionIdle;
   syncProcessingSessions: SyncProcessingSessions;
   isSessionProcessing: IsSessionProcessing;
+  refreshRunningSessions: () => Promise<ReadonlySet<string> | null>;
 };
 
 const SessionProtectionStateContext = createContext<SessionActivityMap | null>(null);
@@ -80,17 +82,11 @@ const parseStartedAt = (value: unknown): number | undefined => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
-const parseProvider = (value: unknown): LLMProvider | null => {
-  if (
-    value === 'claude'
-    || value === 'cursor'
-    || value === 'codex'
-    || value === 'opencode'
-    || value === 'omp'
-  ) {
-    return value;
+const preserveIsOneShot = <T extends RunningSession>(parsed: T, value: unknown): T => {
+  if (typeof value === 'boolean') {
+    parsed.isOneShot = value;
   }
-  return null;
+  return parsed;
 };
 
 const parseRunningSession = (session: unknown): RunningSession | null => {
@@ -99,8 +95,9 @@ const parseRunningSession = (session: unknown): RunningSession | null => {
   }
 
   const sessionId = 'sessionId' in session ? session.sessionId : null;
-  const provider = parseProvider('provider' in session ? session.provider : null);
+  const provider = parseLLMProvider('provider' in session ? session.provider : null);
   const lastSeq = 'lastSeq' in session ? session.lastSeq : null;
+  const isOneShot = 'isOneShot' in session ? session.isOneShot : undefined;
   if (
     typeof sessionId !== 'string'
     || !sessionId
@@ -114,7 +111,7 @@ const parseRunningSession = (session: unknown): RunningSession | null => {
   const source = 'source' in session ? session.source : null;
   if (source === 'terminal') {
     return lastSeq === 0
-      ? { sessionId, provider, source, lastSeq: 0 }
+      ? preserveIsOneShot({ sessionId, provider, source, lastSeq: 0 }, isOneShot)
       : null;
   }
 
@@ -129,7 +126,7 @@ const parseRunningSession = (session: unknown): RunningSession | null => {
       && projectId.length > 0
       && typeof sessionTitle === 'string'
       && (typeof lastActivity === 'string' || lastActivity === null)
-      ? {
+      ? preserveIsOneShot({
           sessionId,
           provider,
           source,
@@ -138,7 +135,7 @@ const parseRunningSession = (session: unknown): RunningSession | null => {
           lastActivity,
           completedAt,
           lastSeq: 0,
-        }
+        }, isOneShot)
       : null;
   }
 
@@ -147,13 +144,13 @@ const parseRunningSession = (session: unknown): RunningSession | null => {
     return null;
   }
 
-  return {
+  return preserveIsOneShot({
     sessionId,
     provider,
     source,
     startedAt,
     lastSeq,
-  };
+  }, isOneShot);
 };
 
 const terminalSessionMapsMatch = (
@@ -165,7 +162,11 @@ const terminalSessionMapsMatch = (
   }
 
   for (const [sessionId, session] of left) {
-    if (right.get(sessionId)?.provider !== session.provider) {
+    const other = right.get(sessionId);
+    if (
+      other?.provider !== session.provider
+      || other.isOneShot !== session.isOneShot
+    ) {
       return false;
     }
   }
@@ -188,6 +189,7 @@ const recentSessionMapsMatch = (
       || other.projectId !== session.projectId
       || other.sessionTitle !== session.sessionTitle
       || other.lastActivity !== session.lastActivity
+      || other.isOneShot !== session.isOneShot
     ) {
       return false;
     }
@@ -212,12 +214,15 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
   const [recentWebSessions, setRecentWebSessions] = useState<Map<string, RecentWebSession>>(
     new Map(),
   );
+  const runningSessionsRequestIdRef = useRef(0);
 
-  const refreshRunningSessions = useCallback(async () => {
+  const refreshRunningSessions = useCallback(async (): Promise<ReadonlySet<string> | null> => {
+    const requestId = (runningSessionsRequestIdRef.current += 1);
+
     try {
       const response = await api.runningSessions();
       if (!response.ok) {
-        return;
+        return null;
       }
 
       const payload = (await response.json()) as RunningSessionsApiPayload;
@@ -238,6 +243,10 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
         ) {
           runningSessions.set(session.sessionId, session);
         }
+      }
+
+      if (runningSessionsRequestIdRef.current !== requestId) {
+        return null;
       }
 
       const processingSnapshots: SessionActivitySnapshot[] = [];
@@ -263,8 +272,12 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
       setRecentWebSessions((previous) => (
         recentSessionMapsMatch(previous, recentSessions) ? previous : recentSessions
       ));
+      return new Set(runningSessions.keys());
     } catch (error) {
-      console.error('[SessionProtection] Failed to sync running sessions:', error);
+      if (runningSessionsRequestIdRef.current === requestId) {
+        console.error('[SessionProtection] Failed to sync running sessions:', error);
+      }
+      return null;
     }
   }, [syncProcessingSessions]);
 
@@ -286,11 +299,13 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
       markSessionIdle,
       syncProcessingSessions,
       isSessionProcessing,
+      refreshRunningSessions,
     }),
     [
       isSessionProcessing,
       markSessionIdle,
       markSessionProcessing,
+      refreshRunningSessions,
       syncProcessingSessions,
     ],
   );

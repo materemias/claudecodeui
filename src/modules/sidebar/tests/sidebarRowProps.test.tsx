@@ -288,3 +288,52 @@ test('Running hydrates a retained session beyond the loaded page and dedupes a l
   assert.equal(deduped[0]?.sessions?.length, 1);
   assert.equal(deduped[0]?.sessions?.[0]?.summary, 'Database title');
 });
+
+test('Running excludes one-shot canonical and recent rows', () => {
+  const baseProject = makeProject('one-shot-project', ['canonical-visible', 'canonical-hidden']);
+  const project: Project = {
+    ...baseProject,
+    sessions: (baseProject.sessions ?? []).map((session) => (
+      session.id === 'canonical-hidden'
+        ? { ...session, isOneShot: true }
+        : session
+    )),
+  };
+  const recentSessions: RecentWebSessionMap = new Map([
+    ['recent-visible', {
+      sessionId: 'recent-visible',
+      provider: 'claude',
+      source: 'recent',
+      projectId: 'one-shot-project',
+      sessionTitle: 'Recent visible',
+      lastActivity: null,
+      completedAt: 1_000,
+      lastSeq: 0,
+      isOneShot: false,
+    }],
+    ['recent-hidden', {
+      sessionId: 'recent-hidden',
+      provider: 'claude',
+      source: 'recent',
+      projectId: 'one-shot-project',
+      sessionTitle: 'Recent hidden',
+      lastActivity: null,
+      completedAt: 2_000,
+      lastSeq: 0,
+      isOneShot: true,
+    }],
+  ]);
+  const runningIds = new Set([
+    'canonical-visible',
+    'canonical-hidden',
+    'recent-visible',
+    'recent-hidden',
+  ]);
+
+  const runningProjects = buildRunningProjects([project], runningIds, recentSessions, 'name');
+  assert.deepEqual(
+    runningProjects[0]?.sessions?.map((session) => session.id),
+    ['canonical-visible', 'recent-visible'],
+  );
+  assert.equal(runningProjects[0]?.sessions?.[1]?.isOneShot, false);
+});

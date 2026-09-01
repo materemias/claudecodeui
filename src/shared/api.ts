@@ -196,8 +196,8 @@ export const api = {
   deleteSession: (sessionId: string, hardDelete = false) =>
     del(`/api/providers/sessions/${sessionId}${query({ force: hardDelete })}`),
   getArchivedSessions: () => get('/api/providers/sessions/archived'),
-  // Resolves one session (by app id or provider-native id) to its metadata and
-  // owning project — used when a /session/<id> URL isn't in loaded payloads.
+  // Resolves one session by app id or provider-native id to its metadata and
+  // owning project. Deep links and running rows use it when pagination omitted the session.
   sessionDetails: (sessionId: string) =>
     get(`/api/providers/sessions/${encodeURIComponent(sessionId)}`),
   runningSessions: () => get('/api/providers/sessions/running'),

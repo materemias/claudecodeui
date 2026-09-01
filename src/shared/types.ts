@@ -80,16 +80,20 @@ export type ProjectSession = {
   messageCount?: number;
   provider?: LLMProvider;
   __provider?: LLMProvider;
+  /** True for a transient one-shot run that must stay out of the sidebar. */
+  isOneShot?: boolean;
   // Tags the session with the owning project's DB `projectId` so UI handlers
   // (session switching, sidebar focus, etc.) can match against selectedProject.
   __projectId?: string;
   [key: string]: unknown;
 };
 
-/** Pagination metadata returned alongside a project's session page. */
+/** Pagination metadata for a project's session source, including the client cursor for the next API page. */
 type ProjectSessionMeta = {
   total?: number;
   hasMore?: boolean;
+  /** Number of canonical API rows consumed. Hydrated running rows do not advance this cursor. */
+  nextOffset?: number;
   [key: string]: unknown;
 };
 
@@ -115,6 +119,8 @@ export type Project = {
   sessions?: ProjectSession[];
   sessionMeta?: ProjectSessionMeta;
   taskmaster?: ProjectTaskmasterInfo;
+  /** True only until the active project source confirms a project synthesized from a running row. */
+  __hydratedOnly?: boolean;
   [key: string]: unknown;
 };
 
@@ -204,12 +210,14 @@ export type RunningSession =
       source: 'processing';
       startedAt: number;
       lastSeq: number;
+      isOneShot?: boolean;
     }
   | {
       sessionId: string;
       provider: LLMProvider;
       source: 'terminal';
       lastSeq: 0;
+      isOneShot?: boolean;
     }
   | {
       sessionId: string;
@@ -220,6 +228,7 @@ export type RunningSession =
       lastActivity: string | null;
       completedAt: number;
       lastSeq: 0;
+      isOneShot?: boolean;
     };
 
 /** A status-only running session observed in an external terminal. */

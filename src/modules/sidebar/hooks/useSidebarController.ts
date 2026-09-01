@@ -55,6 +55,8 @@ type UseSidebarControllerArgs = {
   onSessionSelect: (session: ProjectSession) => void;
   onSessionDelete?: (sessionId: string) => void;
   onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
+  onHydrateRunningSessions: (sessionIds: ReadonlySet<string>) => Promise<void>;
+  refreshRunningSessions: () => Promise<ReadonlySet<string> | null>;
   // `projectId` is the DB-assigned identifier; callbacks use that post-migration.
   onProjectDelete?: (projectId: string) => void;
   setCurrentProject: (project: Project) => void;
@@ -75,21 +77,31 @@ export function buildRunningProjects(
 
   const recentSessionsByProject = new Map<string, ProjectSession[]>();
   for (const session of recentWebSessions.values()) {
+    if (session.isOneShot === true) {
+      continue;
+    }
+
     const projectSessions = recentSessionsByProject.get(session.projectId) ?? [];
-    projectSessions.push({
+    const retainedSession: ProjectSession = {
       id: session.sessionId,
       summary: session.sessionTitle,
       lastActivity: session.lastActivity ?? undefined,
       provider: session.provider,
       __provider: session.provider,
       __projectId: session.projectId,
-    });
+    };
+    if (typeof session.isOneShot === 'boolean') {
+      retainedSession.isOneShot = session.isOneShot;
+    }
+    projectSessions.push(retainedSession);
     recentSessionsByProject.set(session.projectId, projectSessions);
   }
 
   const projectsWithRunningSessions = projects.reduce<Project[]>((acc, project) => {
     const sessions = (project.sessions ?? []).filter(
-      (session) => runningSessionIds.has(String(session.id)),
+      (session) =>
+        session.isOneShot !== true
+        && runningSessionIds.has(String(session.id)),
     );
     const sessionIds = new Set(sessions.map((session) => String(session.id)));
 
@@ -133,6 +145,8 @@ export function useSidebarController({
   onSessionSelect,
   onSessionDelete,
   onLoadMoreSessions,
+  onHydrateRunningSessions,
+  refreshRunningSessions,
   onProjectDelete,
   setCurrentProject,
   setSidebarVisible,
@@ -190,6 +204,12 @@ export function useSidebarController({
     return sessionIds;
   }, [activeSessions, recentWebSessions, terminalRunningSessions]);
   const runningSessionsCount = runningSessionIds.size;
+
+  useEffect(() => {
+    if (!isLoading && runningSessionIds.size > 0) {
+      void onHydrateRunningSessions(runningSessionIds);
+    }
+  }, [isLoading, onHydrateRunningSessions, runningSessionIds]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -1000,8 +1020,10 @@ export function useSidebarController({
   const refreshProjects = useCallback(async () => {
     setIsRefreshing(true);
     try {
+      const refreshedSessionIds = await refreshRunningSessions();
       await Promise.all([
         Promise.resolve(onRefresh()),
+        onHydrateRunningSessions(refreshedSessionIds ?? runningSessionIds),
         fetchArchivedSessions(),
         searchMode === 'conversations'
           ? fetchRecentConversationsPage(0, false)
@@ -1010,7 +1032,15 @@ export function useSidebarController({
     } finally {
       setIsRefreshing(false);
     }
-  }, [fetchArchivedSessions, fetchRecentConversationsPage, onRefresh, searchMode]);
+  }, [
+    fetchArchivedSessions,
+    fetchRecentConversationsPage,
+    onHydrateRunningSessions,
+    onRefresh,
+    refreshRunningSessions,
+    runningSessionIds,
+    searchMode,
+  ]);
 
   const updateSessionSummary = useCallback(
     // `_projectId` and `_provider` are preserved for compatibility with

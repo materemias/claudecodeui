@@ -124,13 +124,15 @@ export const sessionsService = {
    * Returns CloudCLI runs completed within four hours, active CloudCLI runs,
    * and supported provider CLIs attached to a host terminal. Active sources
    * win when rows share a stable app session id, and processing wins over a
-   * terminal row so callers keep Web UI interruption state.
+   * terminal row so callers keep Web UI interruption state. No source here
+   * marks a run as transient, so every row reports `isOneShot: false` unless
+   * its producer already said otherwise.
    */
   listRunningSessions(): RunningSession[] {
     const sessions = new Map<string, RunningSession>();
 
     for (const session of localAgentSessionsService.listRunningSessions()) {
-      sessions.set(session.sessionId, session);
+      sessions.set(session.sessionId, { ...session, isOneShot: session.isOneShot ?? false });
     }
     for (const session of chatRunRegistry.listRecentlyCompletedRuns()) {
       if (sessions.has(session.sessionId)) {
@@ -149,11 +151,12 @@ export const sessionsService = {
         projectId: project.project_id,
         sessionTitle: row.custom_name?.trim() || row.session_id,
         lastActivity: row.updated_at ?? row.created_at ?? null,
+        isOneShot: false,
         lastSeq: 0,
       });
     }
     for (const session of chatRunRegistry.listRunningRuns()) {
-      sessions.set(session.sessionId, { ...session, source: 'processing' });
+      sessions.set(session.sessionId, { ...session, source: 'processing', isOneShot: false });
     }
 
     return [...sessions.values()];
