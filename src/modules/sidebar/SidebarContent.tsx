@@ -406,22 +406,7 @@ export default function SidebarContent({
               </p>
             </div>
           ) : (
-            <div className="space-y-2">
-              <div className="mx-2 flex items-center justify-between rounded-lg border border-border/60 bg-card/50 px-3 py-2 shadow-sm">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
-                    <Activity className="h-3.5 w-3.5" />
-                  </span>
-                  <span className="truncate text-xs font-normal text-foreground">
-                    {t('running.title', 'Running now')}
-                  </span>
-                </div>
-                <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-normal text-emerald-700 dark:text-emerald-300">
-                  {runningSessionsCount}
-                </span>
-              </div>
-              <SidebarProjectList {...projectListProps} />
-            </div>
+            <SidebarProjectList {...projectListProps} />
           )
         ) : searchMode === 'archived' ? (
           isArchivedSessionsLoading ? (
