@@ -499,8 +499,12 @@ export function useChatSessionState({
 
       try {
         const result = await sessionStore.fetchMore(requestSessionId, {
-          limit: SESSION_MESSAGES_PAGE_SIZE,
-          canRequest: () => ownsTranscript(requestGeneration, requestIdentity, requestSessionId),
+          limit: 80,
+          canRequest: () => (
+            ownsTranscript(requestGeneration, requestIdentity, requestSessionId)
+            && isActiveRef.current
+            && activeSessionIdRef.current === requestSessionId
+          ),
         });
         if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return false;
 
@@ -526,7 +530,7 @@ export function useChatSessionState({
         }
 
         pendingScrollRestoreRef.current = scrollRestoreState;
-        setVisibleMessageCount((prev) => prev + SESSION_MESSAGES_PAGE_SIZE);
+        setVisibleMessageCount((prev) => prev + prependedCount);
         if (!slot.hasMore) {
           allMessagesLoadedRef.current = true;
           setAllMessagesLoaded(true);
