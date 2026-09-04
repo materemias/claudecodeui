@@ -180,7 +180,8 @@
       "loadAll": "Cargar todos los mensajes",
       "loadingAll": "Cargando todos los mensajes...",
       "allLoaded": "Todos los mensajes cargados",
-      "perfWarning": "Todos los mensajes cargados — el desplazamiento puede ser más lento. Haz clic en \"Ir al final\" para recuperar el rendimiento."
+      "perfWarning": "Todos los mensajes cargados — el desplazamiento puede ser más lento. Haz clic en \"Ir al final\" para recuperar el rendimiento.",
+      "turnInterrupted": "La conexión con el agente se perdió antes de que terminara este turno. Envía de nuevo para continuar."
     }
   },
   "shell": {

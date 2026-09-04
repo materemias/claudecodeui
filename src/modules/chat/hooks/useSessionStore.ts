@@ -249,6 +249,42 @@ function isAssistantTextEchoedInSameTurnOnServer(
       && (serverMessage.content || '').trim() === assistantText,
     );
 }
+
+function isPersistedTurnCompletion(
+  partial: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+  realtimeMessages: NormalizedMessage[],
+): boolean {
+  const partialContent = (partial.content || '').trim();
+  const partialTime = readMessageTime(partial);
+  if (!partialContent || partialTime === null) return false;
+
+  const turnOrdinal = getUserTurnOrdinalBefore(partial, serverMessages, realtimeMessages);
+  const turnRange = findServerTurnRangeByOrdinal(serverMessages, turnOrdinal);
+  if (!turnRange) return false;
+
+  let assistantSegment = '';
+  for (const serverMessage of serverMessages.slice(turnRange.start + 1, turnRange.end)) {
+    const serverTime = readMessageTime(serverMessage);
+    if (
+      serverTime === null
+      || serverTime < partialTime
+      || serverMessage.kind !== 'text'
+      || serverMessage.role !== 'assistant'
+    ) {
+      assistantSegment = '';
+      continue;
+    }
+    if (partial.kind === 'thinking') return true;
+
+    // One persisted provider message can expand into consecutive text rows,
+    // while its live chunks accumulated into one buffer.
+    assistantSegment += serverMessage.content || '';
+    if (assistantSegment.trim().startsWith(partialContent)) return true;
+  }
+  return false;
+}
+
 function isThinkingEchoedInSameTurnOnServer(
   message: NormalizedMessage,
   serverMessages: NormalizedMessage[],
@@ -850,13 +886,18 @@ export function useSessionStore() {
    * Update or create a streaming message (accumulated text so far).
    * Uses a well-known ID so subsequent calls replace the same message.
    */
-  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: LLMProvider) => {
+  const updateStreaming = useCallback((
+    sessionId: string,
+    accumulatedText: string,
+    msgProvider: LLMProvider,
+    timestamp: string,
+  ) => {
     const slot = getSlot(sessionId);
     const streamId = streamingMessageId(sessionId);
     const msg: NormalizedMessage = {
       id: streamId,
       sessionId,
-      timestamp: new Date().toISOString(),
+      timestamp,
       provider: msgProvider,
       kind: 'stream_delta',
       content: accumulatedText,
@@ -879,12 +920,13 @@ export function useSessionStore() {
     blockId: string,
     text: string,
     msgProvider: LLMProvider,
+    timestamp: string,
   ) => {
     const slot = getSlot(sessionId);
     const msg: NormalizedMessage = {
       id: blockId,
       sessionId,
-      timestamp: new Date().toISOString(),
+      timestamp,
       provider: msgProvider,
       kind: 'thinking',
       content: text,
@@ -922,6 +964,23 @@ export function useSessionStore() {
       notify(sessionId);
     }
   }, [notify]);
+  /**
+   * True when refreshed history contains the completed assistant answer at or
+   * after this partial text or reasoning frame's normalized message position.
+   */
+  const hasPersistedTurnCompletion = useCallback((
+    sessionId: string,
+    partial: NormalizedMessage,
+  ): boolean => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return false;
+    const hasPartial = slot.realtimeMessages.some(message => message.id === partial.id);
+    const realtimeMessages = hasPartial
+      ? slot.realtimeMessages
+      : [...slot.realtimeMessages, partial];
+    return isPersistedTurnCompletion(partial, slot.serverMessages, realtimeMessages);
+  }, []);
+
   /** Drop an orphaned realtime row without promoting it to persisted text. */
   const discardRealtimeMessage = useCallback((sessionId: string, messageId: string) => {
     const slot = storeRef.current.get(sessionId);
@@ -959,12 +1018,13 @@ export function useSessionStore() {
     finalizeStreaming,
     updateThinking,
     discardRealtimeMessage,
+    hasPersistedTurnCompletion,
     getMessages,
     getSessionSlot,
   }), [
     fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
     setActiveSession, isStale, updateStreaming, updateThinking, finalizeStreaming,
-    discardRealtimeMessage,
+    discardRealtimeMessage, hasPersistedTurnCompletion,
     getMessages, getSessionSlot,
   ]);
 }

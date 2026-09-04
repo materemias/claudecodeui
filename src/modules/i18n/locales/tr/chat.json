@@ -147,7 +147,8 @@
       "loadAll": "Tüm mesajları yükle",
       "loadingAll": "Tüm mesajlar yükleniyor...",
       "allLoaded": "Tüm mesajlar yüklendi",
-      "perfWarning": "Tüm mesajlar yüklendi — kaydırma yavaşlayabilir. Performansı geri getirmek için \"En alta git\"e tıkla."
+      "perfWarning": "Tüm mesajlar yüklendi — kaydırma yavaşlayabilir. Performansı geri getirmek için \"En alta git\"e tıkla.",
+      "turnInterrupted": "Bu tur tamamlanmadan önce ajanla bağlantı koptu. Devam etmek için yeniden gönderin."
     }
   },
   "shell": {
