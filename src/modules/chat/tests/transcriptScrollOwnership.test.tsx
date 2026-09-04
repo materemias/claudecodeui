@@ -6,10 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NormalizedMessage, Project, ProjectSession } from '@/shared/types';
 
 /**
- * The transcript's scroll position is written from five places coordinated by
- * refs and timers rather than by one owner. These are the two cases where that
- * coordination was observably wrong; both are timing bugs, so they are driven
- * on fake timers rather than by clicking.
+ * The transcript has several legitimate scroll writers. These tests pin
+ * ownership to the viewed session and to the reader's latest gesture.
  */
 
 vi.mock('@/shared/api', () => ({
@@ -63,17 +61,19 @@ function createContainer(scrollHeight: number, clientHeight: number) {
   return { element: element as HTMLDivElement, writes, scrollHeight };
 }
 
-function createStore(messagesBySession: Map<string, NormalizedMessage[]>) {
+function createStore(
+  messagesBySession: Map<string, NormalizedMessage[]>,
+  hasMoreBySession: Record<string, boolean> = {},
+) {
   // A hydrated slot, so the session-loading effect takes its early return
   // instead of re-fetching on every render.
   const slotFor = (sessionId: string) => ({
     fetchedAt: 1,
     status: 'idle' as const,
     total: messagesBySession.get(sessionId)?.length ?? 0,
-    hasMore: false,
+    hasMore: hasMoreBySession[sessionId] ?? false,
     offset: messagesBySession.get(sessionId)?.length ?? 0,
   });
-
   return {
     fetchFromServer: vi.fn(async (sessionId: string) => slotFor(sessionId)),
     fetchMore: vi.fn(async (sessionId: string) => ({ slot: slotFor(sessionId), prependedCount: 0 })),
@@ -96,33 +96,38 @@ function createStore(messagesBySession: Map<string, NormalizedMessage[]>) {
 async function renderChatSessionState(options: {
   session: ProjectSession;
   store: ReturnType<typeof createStore>;
+  externalMessageUpdate?: number;
 }) {
   const { useChatSessionState } = await import('@/modules/chat/hooks/useChatSessionState');
 
   return renderHook(
-    ({ session }: { session: ProjectSession }) =>
+    ({ session, externalMessageUpdate }: {
+      session: ProjectSession;
+      externalMessageUpdate?: number;
+    }) =>
       useChatSessionState({
         isActive: true,
         selectedProject: project,
         selectedSession: session,
         ws: null,
         sendMessage: vi.fn(),
+        externalMessageUpdate,
         statusCheckSentAtRef: { current: new Map() },
         lastSeqRef: { current: new Map() },
         sessionStore: options.store as never,
       }),
-    { initialProps: { session: options.session } },
+    {
+      initialProps: {
+        session: options.session,
+        externalMessageUpdate: options.externalMessageUpdate,
+      },
+    },
   );
 }
-
 beforeEach(() => {
   vi.useFakeTimers();
-  // The initial-scroll effect is a separate writer that re-scrolls to the
-  // bottom every animation frame until the height settles. It would satisfy an
-  // assertion meant for the deferred timer, so it is silenced here — these
-  // tests are about which writer wins, and it is not one of the two.
-  vi.stubGlobal('requestAnimationFrame', () => 0);
-  vi.stubGlobal('cancelAnimationFrame', () => undefined);
+  // Search jump retries use timers. Layout is otherwise driven explicitly by
+  // the synthetic scroll container below.
   localStorage.clear();
 });
 
@@ -132,8 +137,8 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe('deferred scroll-to-bottom', () => {
-  it('does not yank the view back down when the user scrolls up inside the delay', async () => {
+describe('transcript follow ownership', () => {
+  it('does not yank the view back down after the user starts reading upward', async () => {
     const messages = new Map<string, NormalizedMessage[]>([
       [SESSION_A, [buildMessage(0, '2026-01-01T00:00:00.000Z')]],
     ]);
@@ -146,29 +151,26 @@ describe('deferred scroll-to-bottom', () => {
     const container = createContainer(5000, 500);
     (result.current.scrollContainerRef as { current: HTMLDivElement | null }).current = container.element;
 
-    // A new row lands while the user is at the bottom: a scroll is armed for +50ms.
+    act(() => {
+      result.current.handleUserScrollGesture();
+    });
+    container.writes.length = 0;
+
     messages.set(SESSION_A, [
       ...messages.get(SESSION_A)!,
       buildMessage(1, '2026-01-01T00:00:01.000Z'),
     ]);
     act(() => {
-      rerender({ session: { id: SESSION_A } as ProjectSession });
-    });
-
-    // ...and the user drags upward before it fires.
-    act(() => {
-      result.current.setIsUserScrolledUp(true);
-    });
-    container.writes.length = 0;
-
-    act(() => {
-      vi.advanceTimersByTime(200);
+      rerender({
+        session: { id: SESSION_A } as ProjectSession,
+        externalMessageUpdate: undefined,
+      });
     });
 
     assert.deepEqual(
       container.writes,
       [],
-      `a scroll armed before the user scrolled up must not fire afterwards; got ${JSON.stringify(container.writes)}`,
+      `a reader-owned viewport must not follow new rows; got ${JSON.stringify(container.writes)}`,
     );
   });
 
@@ -184,24 +186,171 @@ describe('deferred scroll-to-bottom', () => {
 
     const container = createContainer(5000, 500);
     (result.current.scrollContainerRef as { current: HTMLDivElement | null }).current = container.element;
+    container.writes.length = 0;
 
     messages.set(SESSION_A, [
       ...messages.get(SESSION_A)!,
       buildMessage(1, '2026-01-01T00:00:01.000Z'),
     ]);
     act(() => {
-      rerender({ session: { id: SESSION_A } as ProjectSession });
-    });
-    container.writes.length = 0;
-
-    act(() => {
-      vi.advanceTimersByTime(200);
+      rerender({
+        session: { id: SESSION_A } as ProjectSession,
+        externalMessageUpdate: undefined,
+      });
     });
 
     expect(container.writes).toContain(container.scrollHeight);
   });
 });
 
+describe('history page ownership', () => {
+  it('discards an older A page after navigating A to B to A', async () => {
+    const messages = new Map<string, NormalizedMessage[]>([
+      [SESSION_A, [buildMessage(0, '2026-01-01T00:00:00.000Z')]],
+      [SESSION_B, [buildMessage(1, '2026-01-01T00:00:01.000Z')]],
+    ]);
+    const store = createStore(messages, { [SESSION_A]: true });
+    type HistoryPage = {
+      slot: {
+        fetchedAt: number;
+        status: 'idle';
+        total: number;
+        hasMore: boolean;
+        offset: number;
+      };
+      prependedCount: number;
+    };
+    let resolvePage!: (value: HistoryPage) => void;
+    const page = new Promise<HistoryPage>((resolve) => {
+      resolvePage = resolve;
+    });
+    store.fetchMore.mockImplementationOnce(() => page);
+
+    const { result, rerender } = await renderChatSessionState({
+      session: { id: SESSION_A } as ProjectSession,
+      store,
+    });
+    await act(async () => {});
+
+    const container = createContainer(5000, 500);
+    container.element.scrollTop = 0;
+    (result.current.scrollContainerRef as { current: HTMLDivElement | null }).current = container.element;
+
+    let staleRequest!: Promise<void>;
+    act(() => {
+      staleRequest = result.current.handleScroll();
+    });
+
+    await act(async () => {
+      rerender({
+        session: { id: SESSION_B } as ProjectSession,
+        externalMessageUpdate: undefined,
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rerender({
+        session: { id: SESSION_A } as ProjectSession,
+        externalMessageUpdate: undefined,
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolvePage({
+        slot: {
+          fetchedAt: 2,
+          status: 'idle',
+          total: 999,
+          hasMore: false,
+          offset: 999,
+        },
+        prependedCount: 20,
+      });
+      await staleRequest;
+    });
+
+    assert.notEqual(
+      result.current.totalMessages,
+      999,
+      'a page launched by the previous visit to A must not write into the new visit',
+    );
+    assert.equal(result.current.isLoadingMoreMessages, false);
+  });
+});
+
+
+describe('reconnect ownership', () => {
+  it('does not scroll the next session when the previous session refresh finishes', async () => {
+    const messages = new Map<string, NormalizedMessage[]>([
+      [SESSION_A, [buildMessage(0, '2026-01-01T00:00:00.000Z')]],
+      [SESSION_B, [buildMessage(1, '2026-01-01T00:00:01.000Z')]],
+    ]);
+    const store = createStore(messages);
+    type RefreshResult = {
+      slot: {
+        fetchedAt: number;
+        status: 'idle';
+        total: number;
+        hasMore: boolean;
+        offset: number;
+      };
+      applied: boolean;
+      changed: boolean;
+      deferred: boolean;
+    };
+    let resolveRefresh!: (value: RefreshResult) => void;
+    const refresh = new Promise<RefreshResult>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    store.refreshLatestFromServer.mockImplementationOnce(() => refresh);
+
+    const { result, rerender } = await renderChatSessionState({
+      session: { id: SESSION_A } as ProjectSession,
+      store,
+    });
+    const container = createContainer(5000, 500);
+    (result.current.scrollContainerRef as { current: HTMLDivElement | null }).current = container.element;
+
+    await act(async () => {
+      rerender({
+        session: { id: SESSION_A } as ProjectSession,
+        externalMessageUpdate: 1,
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rerender({
+        session: { id: SESSION_B } as ProjectSession,
+        externalMessageUpdate: 1,
+      });
+      await Promise.resolve();
+    });
+    container.writes.length = 0;
+
+    await act(async () => {
+      resolveRefresh({
+        slot: {
+          fetchedAt: 2,
+          status: 'idle',
+          total: 1,
+          hasMore: false,
+          offset: 1,
+        },
+        applied: true,
+        changed: false,
+        deferred: false,
+      });
+      await vi.advanceTimersByTimeAsync(250);
+    });
+
+    assert.deepEqual(
+      container.writes,
+      [],
+      'a reconnect refresh must not carry a bottom-follow into the next session',
+    );
+  });
+});
 describe('search jump ownership', () => {
   it('does not follow the user into the next session', { timeout: 20_000 }, async () => {
     const messages = new Map<string, NormalizedMessage[]>([
@@ -236,7 +385,10 @@ describe('search jump ownership', () => {
 
     // The user gives up waiting and opens a different session.
     await act(async () => {
-      rerender({ session: { id: SESSION_B } as ProjectSession });
+      rerender({
+        session: { id: SESSION_B } as ProjectSession,
+        externalMessageUpdate: undefined,
+      });
     });
 
     // Let the whole retry budget elapse (20 retries, 150ms apart).
