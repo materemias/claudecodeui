@@ -28,6 +28,8 @@ type LazyMessageRowProps = {
   lazyRows: LazyRowObserver | null;
   /** Mirrors the row's own `data-message-timestamp`, present even while unmounted. */
   timestamp: ChatMessage['timestamp'] | undefined;
+  /** Marks a user-turn target on this persistent wrapper, even while its content is unmounted. */
+  isUserTurn: boolean;
   /**
    * Rows near the tail render their content on first commit so the initial
    * scroll-to-bottom measures real heights; everything older starts as a
@@ -40,6 +42,7 @@ type LazyMessageRowProps = {
 export default function LazyMessageRow({
   lazyRows,
   timestamp,
+  isUserTurn,
   initiallyNearViewport,
   children,
 }: LazyMessageRowProps) {
@@ -72,6 +75,7 @@ export default function LazyMessageRow({
       ref={elementRef}
       className="chat-message-row"
       data-message-timestamp={timestamp || undefined}
+      data-user-turn={isUserTurn ? '' : undefined}
       style={isMounted ? undefined : { height: measuredHeight ?? ESTIMATED_ROW_HEIGHT_PX }}
     >
       {isMounted ? children : null}

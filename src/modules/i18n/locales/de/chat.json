@@ -110,7 +110,9 @@
     "clickToChangeMode": "Klicken, um den Berechtigungsmodus zu ändern (oder Tab in der Eingabe drücken)",
     "showAllCommands": "Alle Befehle anzeigen",
     "clearInput": "Eingabe leeren",
-    "scrollToBottom": "Nach unten scrollen"
+    "scrollToBottom": "Nach unten scrollen",
+    "previousUserTurn": "Vorherige Nutzernachricht",
+    "nextUserTurn": "Nächste Nutzernachricht"
   },
   "providerSelection": {
     "title": "KI-Assistent wählen",
