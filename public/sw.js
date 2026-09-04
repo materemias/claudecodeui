@@ -1,7 +1,7 @@
 // Service Worker for CloudCLI PWA
 // Cache only manifest (needed for PWA install). HTML and JS are never pre-cached
 // so a rebuild + refresh always picks up the latest assets.
-const CACHE_NAME = 'claude-ui-v2';
+const CACHE_NAME = 'claude-ui-v3';
 const urlsToCache = [
   '/manifest.json'
 ];
@@ -51,9 +51,18 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Everything else — network-first
+  // Keep the installable manifest cache synchronized with the network copy.
+  const shouldRefreshCache = new URL(url).pathname.endsWith('/manifest.json');
   event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
+    fetch(event.request)
+      .then(async response => {
+        if (shouldRefreshCache && response.ok) {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put(event.request, response.clone());
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
 
