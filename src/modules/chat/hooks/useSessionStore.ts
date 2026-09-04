@@ -249,6 +249,39 @@ function isAssistantTextEchoedInSameTurnOnServer(
       && (serverMessage.content || '').trim() === assistantText,
     );
 }
+function isThinkingEchoedInSameTurnOnServer(
+  message: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+  realtimeMessages: NormalizedMessage[],
+): boolean {
+  const thinking = (message.content || '').trim();
+  if (!thinking) return false;
+
+  const turnOrdinal = getUserTurnOrdinalBefore(message, serverMessages, realtimeMessages);
+  const turnRange = findServerTurnRangeByOrdinal(serverMessages, turnOrdinal);
+  if (!turnRange) return false;
+
+  const serverThinking = serverMessages
+    .slice(turnRange.start + 1, turnRange.end)
+    .filter(serverMessage => serverMessage.kind === 'thinking')
+    .map(serverMessage => serverMessage.content || '')
+    .join('')
+    .trim();
+  return serverThinking.length > 0 && serverThinking.includes(thinking);
+}
+
+/** Stable row id used while one session's assistant text is streaming. */
+export const streamingMessageId = (sessionId: string): string => `__streaming_${sessionId}`;
+
+function collectServerToolIds(serverMessages: NormalizedMessage[]): Set<string> {
+  const ids = new Set<string>();
+  for (const message of serverMessages) {
+    if (message.kind === 'tool_use' && message.toolId) {
+      ids.add(message.toolId);
+    }
+  }
+  return ids;
+}
 
 /**
  * After `finalizeStreaming`, the client holds a synthetic assistant `text` row
@@ -302,6 +335,7 @@ function pruneRealtimeSupersededByServer(
   }
 
   const serverIds = new Set(serverMessages.map((message) => message.id));
+  const serverToolIds = collectServerToolIds(serverMessages);
   const reconciledRealtimeMessages = removeOptimisticUserEchoes(serverMessages, realtimeMessages);
 
   return reconciledRealtimeMessages.filter((message) => {
@@ -309,28 +343,33 @@ function pruneRealtimeSupersededByServer(
       return false;
     }
 
-    if (message.kind === 'stream_delta' || message.id === `__streaming_${message.sessionId}`) {
-      if (isAssistantTextEchoedInSameTurnOnServer(message, serverMessages, realtimeMessages)) {
+    if (message.kind === 'stream_delta' || message.id === streamingMessageId(message.sessionId)) {
+      if (isAssistantTextEchoedInSameTurnOnServer(message, serverMessages, reconciledRealtimeMessages)) {
         return false;
       }
       return true;
     }
 
     if (message.kind === 'text' && message.role === 'assistant') {
-      if (isAssistantTextEchoedInSameTurnOnServer(message, serverMessages, realtimeMessages)) {
+      if (isAssistantTextEchoedInSameTurnOnServer(message, serverMessages, reconciledRealtimeMessages)) {
         return false;
       }
       return true;
+    }
+    if (message.kind === 'thinking') {
+      return !isThinkingEchoedInSameTurnOnServer(
+        message,
+        serverMessages,
+        reconciledRealtimeMessages,
+      );
     }
 
     if (message.kind === 'text' && message.role === 'user') {
       return true;
     }
 
-    if (message.kind === 'tool_use' && message.toolId) {
-      if (serverMessages.some((serverMessage) => serverMessage.kind === 'tool_use' && serverMessage.toolId === message.toolId)) {
-        return false;
-      }
+    if (message.kind === 'tool_use' && message.toolId && serverToolIds.has(message.toolId)) {
+      return false;
     }
 
     return true;
@@ -346,9 +385,13 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
   }
 
   const serverIds = new Set(server.map((message) => message.id));
+  const serverToolIds = collectServerToolIds(server);
   const reconciledRealtime = removeOptimisticUserEchoes(server, realtime);
   const extra = reconciledRealtime.filter((message) => {
     if (serverIds.has(message.id)) {
+      return false;
+    }
+    if (message.kind === 'tool_use' && message.toolId && serverToolIds.has(message.toolId)) {
       return false;
     }
     return true;
@@ -809,7 +852,7 @@ export function useSessionStore() {
    */
   const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: LLMProvider) => {
     const slot = getSlot(sessionId);
-    const streamId = `__streaming_${sessionId}`;
+    const streamId = streamingMessageId(sessionId);
     const msg: NormalizedMessage = {
       id: streamId,
       sessionId,
@@ -828,6 +871,34 @@ export function useSessionStore() {
     recomputeMergedIfNeeded(slot);
     notify(sessionId);
   }, [getSlot, notify]);
+  /**
+   * Update one accumulated OMP reasoning block under a stable synthetic id.
+   */
+  const updateThinking = useCallback((
+    sessionId: string,
+    blockId: string,
+    text: string,
+    msgProvider: LLMProvider,
+  ) => {
+    const slot = getSlot(sessionId);
+    const msg: NormalizedMessage = {
+      id: blockId,
+      sessionId,
+      timestamp: new Date().toISOString(),
+      provider: msgProvider,
+      kind: 'thinking',
+      content: text,
+    };
+    const idx = slot.realtimeMessages.findIndex(message => message.id === blockId);
+    if (idx >= 0) {
+      slot.realtimeMessages = [...slot.realtimeMessages];
+      slot.realtimeMessages[idx] = msg;
+    } else {
+      slot.realtimeMessages = [...slot.realtimeMessages, msg];
+    }
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
+  }, [getSlot, notify]);
 
   /**
    * Finalize streaming: convert the streaming message to a regular text message.
@@ -836,7 +907,7 @@ export function useSessionStore() {
   const finalizeStreaming = useCallback((sessionId: string) => {
     const slot = storeRef.current.get(sessionId);
     if (!slot) return;
-    const streamId = `__streaming_${sessionId}`;
+    const streamId = streamingMessageId(sessionId);
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       const stream = slot.realtimeMessages[idx];
@@ -850,6 +921,16 @@ export function useSessionStore() {
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
     }
+  }, [notify]);
+  /** Drop an orphaned realtime row without promoting it to persisted text. */
+  const discardRealtimeMessage = useCallback((sessionId: string, messageId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const remaining = slot.realtimeMessages.filter(message => message.id !== messageId);
+    if (remaining.length === slot.realtimeMessages.length) return;
+    slot.realtimeMessages = remaining;
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
   }, [notify]);
 
   /**
@@ -876,11 +957,14 @@ export function useSessionStore() {
     isStale,
     updateStreaming,
     finalizeStreaming,
+    updateThinking,
+    discardRealtimeMessage,
     getMessages,
     getSessionSlot,
   }), [
     fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
-    setActiveSession, isStale, updateStreaming, finalizeStreaming,
+    setActiveSession, isStale, updateStreaming, updateThinking, finalizeStreaming,
+    discardRealtimeMessage,
     getMessages, getSessionSlot,
   ]);
 }

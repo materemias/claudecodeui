@@ -58,10 +58,10 @@ it.
    from them. `complete` triggers a REST refresh of the persisted tail; the live copy of
    the reply survives until the persisted copy demonstrably supersedes it. Details in
    [the message store](./04-message-store-and-lazy-loading.md).
-8. **The delta buffer belongs to the chat pane, not to a session.** There is one
-   `accumulatedStreamRef` and one `streamTimerRef` for the whole `ChatInterface`. Two
-   sessions streaming at once share them. This is a real limitation, not a subtlety —
-   see [Cross-session behaviour](#cross-session-behaviour).
+8. **The delta buffer is keyed by session.** `useChatRealtimeHandlers` holds one
+   `createSessionBuffers` map, so each streaming session accumulates into its own entry
+   and flushes on its own 100 ms timer. Two sessions streaming at once cannot see each
+   other's text — see [Cross-session behaviour](#cross-session-behaviour).
 
 ## The pieces
 
@@ -69,10 +69,10 @@ it.
 | --- | --- |
 | `src/shared/context/WebSocketContext.tsx` | The one socket. Parses each frame and calls every registered listener synchronously. Synthesises the client-only `websocket_reconnected` frame on a re-open, and retries a dropped socket after 3 s. |
 | `src/modules/chat/hooks/useChatRealtimeHandlers.ts` | The whole client-side protocol. One switch on `kind`; the streaming buffer; the `seq` bookkeeping. |
-| `src/modules/chat/ChatInterface.tsx` | Owns the four refs the handler mutates — `accumulatedStreamRef`, `streamTimerRef`, `lastSeqRef`, `statusCheckSentAtRef` — and clears the first two on unmount. |
+| `src/modules/chat/ChatInterface.tsx` | Owns the two refs the handler mutates across sessions — `lastSeqRef` and `statusCheckSentAtRef`. The per-session delta and reasoning buffers live in `useChatRealtimeHandlers` and stop their timers on unmount. |
 | `src/modules/chat/hooks/useSessionStore.ts` | Per-session slots. `appendRealtime`, `updateStreaming`, `finalizeStreaming`, `truncateAt`, and the merge of live and persisted rows. |
 | `src/modules/chat/hooks/useChatMessages.ts` | `normalizedToChatMessages` — the projection from store records to UI objects. Pairs `tool_use` with `tool_result`, folds subagent rows into their container, and memoises through a `WeakMap`. |
-| `src/modules/chat/hooks/useChatSessionState.ts` | Sends `chat.subscribe` on session open and on reconnect, owns `requestLatestMessages` and `resetStreamingState`, and memoises `chatMessages`. |
+| `src/modules/chat/hooks/useChatSessionState.ts` | Sends `chat.subscribe` on session open and on reconnect, owns `requestLatestMessages`, and memoises `chatMessages`. |
 | `src/modules/chat/hooks/useChatComposerState.ts` | The outbound side: `chat.send`, `chat.edit-send`, `chat.abort`, `chat.permission-response`, plus the optimistic user echo. |
 | `src/shared/hooks/useSessionProtection.ts` | The per-session activity map that the indicator and the abort button derive from. |
 | `src/modules/chat/transcript/StreamingMarkdown.tsx` | Renders an assistant reply, streaming or finished, as a settled half plus a pending half. |
@@ -398,24 +398,22 @@ kinds are among the five that are never persisted as rows. The rules:
 
 ## Cross-session behaviour
 
-The store is session-keyed and correct for any number of sessions. The streaming buffer is
-not, and this is the sharpest edge in the subsystem.
+The store is session-keyed and correct for any number of sessions, and so is the streaming
+buffer.
 
-`accumulatedStreamRef` and `streamTimerRef` are single refs on `ChatInterface`. When a
-delta arrives:
+`useChatRealtimeHandlers` holds one `createSessionBuffers` map for delta text and another
+for reasoning text. When a delta arrives:
 
-- It is appended to that one ref, **whatever session it belongs to.**
-- The timer, if not already armed, is armed with a closure over *that* frame's session id.
-  The flush writes the ref's entire contents to *that* session.
-- Additionally, if the frame's session is **not** the one on screen, the raw delta is
-  appended to that session's slot as its own row.
+- It is appended to the entry for **its own** session id, creating it on first use.
+- That entry arms its own 100 ms timer; the flush writes only that entry's text to that
+  session's placeholder row.
+- A frame for a session that is not on screen takes the same path, so a background reply
+  arrives as one coalesced row instead of one row per delta.
 
-So two sessions streaming at once share one buffer, and the background session's prose can
-be published into the foreground session's placeholder. Nothing repairs this except a
-session switch, which calls `resetStreamingState` and clears both refs. The background
-session, meanwhile, accumulates one store row per delta rather than one coalesced row;
-those rows only disappear on a server refresh whose persisted assistant text matches them
-exactly, and they count against the 500-row realtime cap.
+Two sessions streaming at once therefore cannot publish into each other's placeholder. An
+entry is closed on that session's `stream_end` or `complete`, dropped when a `chat.subscribe`
+ack proves it predates the subscription, and `stopTimer` clears every pending timer when
+`ChatInterface` unmounts.
 
 Everything else is per-session and behaves: `lastSeqRef` and `statusCheckSentAtRef` are
 `Map`s keyed by session id, the busy map is keyed by session id, the token counter is
@@ -488,10 +486,10 @@ question rendered twice in another.
 | `finalizeStreaming` | It must keep the array position and must not append. `messageStreamEnd.test.tsx` covers the DOM-identity half; the duplicate-bubble half is covered by the store's dedupe. |
 | The `shouldPersist` filter | Adding a kind to it makes that kind renderable, which means `normalizedToChatMessages` needs a case for it or it silently disappears. |
 | Anything in `splitStreamingMarkdown` | `streamingMarkdown.test.ts` for the boundary rules and `streamingMarkdownRenderEquivalence.test.tsx` for split-equals-unsplit on every prefix. Both must pass on the fenced and list fixtures. |
-| A provider's `normalizeMessage` | The kind table above. Adding `stream_delta` to a provider that had none makes the shared buffer and the missing `stream_end` suddenly matter for it. |
+| A provider's `normalizeMessage` | The kind table above. Adding `stream_delta` to a provider that had none makes its session buffer and the missing `stream_end` suddenly matter for it. |
 | `decorateAndRecordEvent` or `seq` assignment | Reconnect replay is `seq > lastSeq` with no gap detection, and `lastSeqRef` only moves forward. Any non-monotonic `seq` silently loses events. |
 | The `status` branch | Both arms. The `token_budget` arm is scoped to the viewed session on purpose, and the other arm currently has no producer — a new producer will start writing status text into the activity map for the first time. |
-| Session-switch cleanup in `useChatSessionState` | `resetStreamingState` is the only thing that unwinds a shared buffer mid-stream. Removing that call re-introduces cross-session text bleed. |
+| `createSessionBuffers` keying or `endStream` | The session id is what keeps two concurrent streams apart. Buffering by anything coarser re-introduces cross-session text bleed, and skipping `endStream` leaves the placeholder row dirty until unmount. |
 
 Related: [the websocket layer](./01-websocket-transport.md) for the transport and the replay
 contract, [the message store](./04-message-store-and-lazy-loading.md) for what happens to
