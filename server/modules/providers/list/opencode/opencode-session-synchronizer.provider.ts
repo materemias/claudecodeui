@@ -18,6 +18,7 @@ type OpenCodeSessionRow = {
   id: string;
   directory: string | null;
   title: string | null;
+  permission: string | null;
   time_created: number | null;
   time_updated: number | null;
   worktree: string | null;
@@ -38,7 +39,7 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
    * Scans OpenCode's shared opencode.db and upserts active sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
-    const result = this.synchronizeRows(since);
+    const result = this.synchronizeRows(since, undefined, since === undefined);
     return result.processed;
   }
 
@@ -54,7 +55,11 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
     return result.firstSessionId;
   }
 
-  private synchronizeRows(since?: Date, limit?: number): SynchronizeRowsResult {
+  private synchronizeRows(
+    since?: Date,
+    limit?: number,
+    preserveArchived = false,
+  ): SynchronizeRowsResult {
     const dbPath = getOpenCodeDatabasePath();
     if (!fsSync.existsSync(dbPath)) {
       return { processed: 0, firstSessionId: null };
@@ -63,6 +68,10 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
       const sinceMillis = since?.getTime() ?? null;
+      const sessionColumns = db.prepare('PRAGMA table_info(session)').all() as Array<{ name: string }>;
+      const permissionExpression = sessionColumns.some((column) => column.name === 'permission')
+        ? 's.permission'
+        : 'NULL';
       const limitClause = limit ? 'LIMIT ?' : '';
       const params = limit ? [sinceMillis, sinceMillis, limit] : [sinceMillis, sinceMillis];
       const rows = db.prepare(`
@@ -70,6 +79,7 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
           s.id AS id,
           s.directory AS directory,
           s.title AS title,
+          ${permissionExpression} AS permission,
           s.time_created AS time_created,
           s.time_updated AS time_updated,
           p.worktree AS worktree
@@ -84,7 +94,7 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       let processed = 0;
       let firstSessionId: string | null = null;
       for (const row of rows) {
-        const indexedSessionId = this.upsertSession(db, row);
+        const indexedSessionId = this.upsertSession(db, row, preserveArchived);
         if (!indexedSessionId) {
           continue;
         }
@@ -105,7 +115,11 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
     }
   }
 
-  private upsertSession(db: Database.Database, row: OpenCodeSessionRow): string | null {
+  private upsertSession(
+    db: Database.Database,
+    row: OpenCodeSessionRow,
+    preserveArchived: boolean,
+  ): string | null {
     const sessionId = readOptionalString(row.id);
     const projectPath = readOptionalString(row.directory) ?? readOptionalString(row.worktree);
     if (!sessionId || !projectPath) {
@@ -129,6 +143,9 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
     const existingSession = sessionsDb.getSessionByProviderSessionId(sessionId)
       ?? sessionsDb.getSessionById(sessionId);
     const existingName = existingSession?.custom_name;
+    const isAppCreatedSession = Boolean(
+      existingSession && existingSession.session_id !== sessionId,
+    );
 
     let nextName: string | undefined;
     if (existingName && existingName !== fallbackTitle) {
@@ -149,7 +166,50 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       normalizeProviderTimestamp(row.time_created),
       normalizeProviderTimestamp(row.time_updated ?? row.time_created),
       null,
+      {
+        isOneShot: this.isOneShotPermission(row.permission) && !isAppCreatedSession,
+        preserveArchived,
+      },
     );
+  }
+
+  /**
+   * Detects the deny rules persisted by `opencode run`.
+   *
+   * Current OpenCode stores an array. The object form covers older databases.
+   */
+  private isOneShotPermission(permissionJson: string | null): boolean {
+    if (!permissionJson) {
+      return false;
+    }
+
+    try {
+      const parsed = JSON.parse(permissionJson) as unknown;
+      if (!Array.isArray(parsed)) {
+        if (typeof parsed !== 'object' || parsed === null) {
+          return false;
+        }
+        const permissionMap = parsed as Record<string, unknown>;
+        return permissionMap.question === 'deny' && permissionMap.plan_enter === 'deny';
+      }
+
+      let deniesQuestion = false;
+      let deniesPlanEnter = false;
+      for (const value of parsed) {
+        if (typeof value !== 'object' || value === null) {
+          continue;
+        }
+        const rule = value as Record<string, unknown>;
+        if (rule.action !== 'deny') {
+          continue;
+        }
+        deniesQuestion ||= rule.permission === 'question';
+        deniesPlanEnter ||= rule.permission === 'plan_enter';
+      }
+      return deniesQuestion && deniesPlanEnter;
+    } catch {
+      return false;
+    }
   }
 
   private readFirstUserText(db: Database.Database, sessionId: string): string | undefined {

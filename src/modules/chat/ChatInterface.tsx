@@ -110,6 +110,8 @@ function ChatInterface({
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
+    applySessionUpsertedSelection,
+    refreshSessionSelection,
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
@@ -250,6 +252,7 @@ function ChatInterface({
     resolvePermissionModeForProvider,
   });
 
+
   useChatRealtimeHandlers({
     isActive,
     subscribe,
@@ -264,6 +267,7 @@ function ChatInterface({
     onSessionProcessing,
     onSessionIdle,
     onWebSocketReconnect: refreshSessionSelection,
+    applySessionUpsertedSelection,
     requestLatestMessages,
     sessionStore,
   });

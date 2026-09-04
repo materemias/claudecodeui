@@ -48,12 +48,18 @@ const writeCodexTranscript = async (
   codexSessionId: string,
   workspacePath: string,
   firstUserMessage?: string,
+  source?: string,
 ): Promise<string> => {
   const sessionsDir = path.join(homeDir, '.codex', 'sessions', '2026', '07', '07');
   await mkdir(sessionsDir, { recursive: true });
 
+  const sessionMetadata = {
+    id: codexSessionId,
+    cwd: workspacePath,
+    ...(source ? { source } : {}),
+  };
   const lines: string[] = [
-    JSON.stringify({ type: 'session_meta', payload: { id: codexSessionId, cwd: workspacePath } }),
+    JSON.stringify({ type: 'session_meta', payload: sessionMetadata }),
   ];
   if (firstUserMessage !== undefined) {
     lines.push(JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: firstUserMessage } }));
@@ -82,6 +88,31 @@ test('Codex synchronizer preserves the title assigned when CloudCLI creates a se
       await synchronizer.synchronize();
 
       assert.equal(sessionsDb.getSessionById('app-1')?.custom_name, 'Fix the login redirect');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Codex exec transcripts are one-shot while ordinary transcripts remain visible', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-session-sync-exec-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    await writeCodexTranscript(tempRoot, 'codex-exec-session', workspacePath, undefined, 'exec');
+    await writeCodexTranscript(tempRoot, 'codex-terminal-session', workspacePath);
+    await writeCodexTranscript(tempRoot, 'codex-app-native', workspacePath, undefined, 'exec');
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createAppSession('codex-app', 'codex', workspacePath);
+      sessionsDb.assignProviderSessionId('codex-app', 'codex-app-native');
+      await new CodexSessionSynchronizer().synchronize();
+
+      assert.equal(sessionsDb.getSessionById('codex-exec-session')?.is_one_shot, 1);
+      assert.equal(sessionsDb.getSessionById('codex-terminal-session')?.is_one_shot, 0);
+      assert.equal(sessionsDb.getSessionById('codex-app')?.is_one_shot, 0);
     });
   } finally {
     restoreHomeDir();

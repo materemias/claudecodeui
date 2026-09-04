@@ -84,6 +84,7 @@ test('assignProviderSessionId merges a watcher-created duplicate into the app ro
       undefined,
       undefined,
       '/fake/provider-race.jsonl',
+      { isOneShot: true },
     );
     assert.equal(sessionsDb.getAllSessions().length, 2);
 
@@ -96,6 +97,7 @@ test('assignProviderSessionId merges a watcher-created duplicate into the app ro
     // Transcript path and name from the duplicate are adopted.
     assert.equal(rows[0]?.jsonl_path, '/fake/provider-race.jsonl');
     assert.equal(rows[0]?.custom_name, 'Watcher Name');
+    assert.equal(rows[0]?.is_one_shot, 0, 'provider mapping proves the row is app-owned');
   });
 });
 

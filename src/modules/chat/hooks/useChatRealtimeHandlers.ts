@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
-import type { ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage } from '@/shared/types';
+import type {
+  ServerEvent,
+  MarkSessionIdle,
+  MarkSessionProcessing,
+  PendingPermissionRequest,
+  ProjectSession,
+  LLMProvider,
+  NormalizedMessage,
+  SessionUpsertedEvent,
+} from '@/shared/types';
 import { showCompletionTitleIndicator } from '@/modules/chat/utils/pageTitleNotification';
 import { playChatCompletionSound, playNotificationSound } from '@/shared/utils';
 import { streamingMessageId } from '@/modules/chat/hooks/useSessionStore';
@@ -139,6 +148,7 @@ type UseChatRealtimeHandlersArgs = {
   onSessionProcessing?: MarkSessionProcessing;
   onSessionIdle?: MarkSessionIdle;
   onWebSocketReconnect?: () => void;
+  applySessionUpsertedSelection?: (event: SessionUpsertedEvent) => void;
   requestLatestMessages: (sessionId: string, allowNetwork?: boolean) => Promise<void>;
   sessionStore: SessionStore;
 };
@@ -170,6 +180,7 @@ export function useChatRealtimeHandlers({
   onSessionProcessing,
   onSessionIdle,
   onWebSocketReconnect,
+  applySessionUpsertedSelection,
   requestLatestMessages,
   sessionStore,
 }: UseChatRealtimeHandlersArgs) {
@@ -383,8 +394,11 @@ export function useChatRealtimeHandlers({
           return;
         }
 
-        // Sidebar/global events — owned by useProjectsState.
         case 'session_upserted':
+          applySessionUpsertedSelection?.(msg as SessionUpsertedEvent);
+          return;
+
+        // Remaining global event is owned by useProjectsState.
         case 'loading_progress':
           return;
 
@@ -605,6 +619,7 @@ export function useChatRealtimeHandlers({
     onSessionProcessing,
     onSessionIdle,
     onWebSocketReconnect,
+    applySessionUpsertedSelection,
     requestLatestMessages,
     sessionStore,
     thinkingBuffers,

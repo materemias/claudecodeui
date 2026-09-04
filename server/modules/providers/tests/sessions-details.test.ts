@@ -43,6 +43,7 @@ test('getSessionDetailsById resolves the owning project for a disk-indexed sessi
     assert.equal(details.provider, 'claude');
     assert.equal(details.summary, 'My session');
     assert.equal(details.isArchived, false);
+    assert.equal(details.isOneShot, false);
     assert.ok(details.project, 'project should be resolved');
     assert.equal(details.project?.projectId, projectRow?.project_id);
     // Paths are normalized to platform separators when stored.

@@ -13,6 +13,7 @@ type SessionSummary = {
   summary: string;
   messageCount: number;
   lastActivity: string;
+  isOneShot: boolean;
 };
 
 type SessionRepositoryRow = {
@@ -21,6 +22,7 @@ type SessionRepositoryRow = {
   custom_name?: string | null;
   updated_at?: string | null;
   created_at?: string | null;
+  is_one_shot: number;
 };
 
 export type ProjectListItem = {
@@ -124,12 +126,13 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
     summary: row.custom_name || '',
     messageCount: 0,
     lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+    isOneShot: Boolean(row.is_one_shot),
   };
 }
 
 function readProjectSessionsIncludingArchived(projectPath: string): ProjectSessionsPageResult {
-  const rows = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath) as SessionRepositoryRow[];
-
+  const rows = (sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath) as SessionRepositoryRow[])
+    .filter((row) => !Boolean(row.is_one_shot));
   return {
     sessions: rows.map(mapSessionRowToSummary),
     total: rows.length,

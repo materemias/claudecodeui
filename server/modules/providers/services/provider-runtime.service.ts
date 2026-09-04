@@ -1,14 +1,17 @@
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { broadcastSessionUpserted } from '@/modules/websocket/index.js';
 import type { IProvider } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
   LLMProvider,
+  PendingProviderSessionSelection,
   ProviderPermissionDecision,
   ProviderRunFunction,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
+  ProviderSessionConfigReport,
 } from '@/shared/types.js';
 
 type ProviderRuntimeServiceDependencies = {
@@ -21,6 +24,14 @@ type ProviderRuntimeServiceDependencies = {
     requestedModel?: string | null,
   ): Promise<string | undefined>;
   getProviderModels: typeof providerModelsService.getProviderModels;
+  readPendingSessionSelection(sessionId: string): PendingProviderSessionSelection;
+  recordProviderSessionConfig(
+    provider: LLMProvider,
+    appSessionId: string | null | undefined,
+    providerSessionId: string,
+    report: ProviderSessionConfigReport,
+  ): string | null;
+  broadcastSessionUpserted(sessionId: string): Promise<void>;
 };
 
 const defaultDependencies: ProviderRuntimeServiceDependencies = {
@@ -30,6 +41,16 @@ const defaultDependencies: ProviderRuntimeServiceDependencies = {
   resolveResumeModel: (provider, sessionId, requestedModel) =>
     providerModelsService.resolveResumeModel(provider, sessionId, requestedModel),
   getProviderModels: (provider) => providerModelsService.getProviderModels(provider),
+  readPendingSessionSelection: (sessionId) =>
+    providerModelsService.readPendingSessionSelection(sessionId),
+  recordProviderSessionConfig: (provider, appSessionId, providerSessionId, report) =>
+    providerModelsService.recordProviderSessionConfig(
+      provider,
+      appSessionId,
+      providerSessionId,
+      report,
+    ),
+  broadcastSessionUpserted,
 };
 
 /**
@@ -64,6 +85,19 @@ export function createProviderRuntimeService(
       dependencies.resolveResumeModel(provider.id, sessionId, requestedModel),
     getProviderModels: async () => dependencies.getProviderModels(provider.id),
     normalizeMessage: (raw, sessionId) => provider.sessions.normalizeMessage(raw, sessionId),
+    readPendingSessionSelection: (sessionId) =>
+      dependencies.readPendingSessionSelection(sessionId ?? ''),
+    async recordSessionConfigReport(appSessionId, providerSessionId, report) {
+      const changedSessionId = dependencies.recordProviderSessionConfig(
+        provider.id,
+        appSessionId,
+        providerSessionId,
+        report,
+      );
+      if (changedSessionId) {
+        await dependencies.broadcastSessionUpserted(changedSessionId);
+      }
+    },
     async isProviderInstalled() {
       try {
         return (await provider.auth.getStatus()).installed;

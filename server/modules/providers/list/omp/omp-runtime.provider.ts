@@ -39,8 +39,9 @@ import crossSpawn from 'cross-spawn';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import { OMP_CONFIGURED_MODEL_SENTINEL, OMP_FALLBACK_CONTEXT_WINDOW, readOmpContextWindow } from '@/modules/providers/list/omp/omp-models.provider.js';
+import { readOmpConfigOptionUpdates } from '@/modules/providers/list/omp/omp-sessions.provider.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
-import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+import { createCompleteMessage, createNormalizedMessage, readOptionalString } from '@/shared/utils.js';
 import { buildAcpPromptBlocks } from '@/shared/image-attachments.js';
 import { locateOmpSessionFile } from '@/modules/providers/list/omp/omp-session-files.js';
 import { StdioJsonRpcClient } from '@/modules/providers/list/omp/stdio-jsonrpc-client.js';
@@ -55,6 +56,8 @@ import type {
   NormalizedMessage,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
+  ProviderSessionConfigReport,
+  ProviderSessionConfigUpdate,
 } from '@/shared/types.js';
 
 /**
@@ -111,6 +114,15 @@ type OmpSessionEntry = {
   aborted: boolean;
   acceptingUpdates: boolean;
   normalizeMessage: (raw: AnyRecord, sid: string | null) => NormalizedMessage[];
+  /** Last config value seen for this native session, used to diff full-array updates. */
+  configValues: Map<string, string>;
+  /** Serializes persistence plus centralized upsert broadcasts for this session. */
+  configReportQueue: Promise<void>;
+  recordConfigReport: (
+    appSessionId: string | null,
+    providerSessionId: string,
+    report: ProviderSessionConfigReport,
+  ) => Promise<void>;
 };
 
 type OmpSetupReservation = {
@@ -469,10 +481,40 @@ async function readOmpTokenUsage(sessionId: string) {
   };
 }
 
+const toPersistedConfigUpdates = (
+  updates: Array<{ configId: string; value: string }>,
+): ProviderSessionConfigUpdate[] => updates.flatMap<ProviderSessionConfigUpdate>(({ configId, value }) => {
+  if (configId === 'model') {
+    return [{ field: 'model' as const, value }];
+  }
+  if (configId === 'thinking') {
+    return [{ field: 'effort' as const, value }];
+  }
+  return [];
+});
+
+function queueConfigReport(
+  entry: OmpSessionEntry,
+  providerSessionId: string,
+  report: ProviderSessionConfigReport,
+): Promise<void> {
+  entry.configReportQueue = entry.configReportQueue
+    .then(() => entry.recordConfigReport(entry.appSessionId, providerSessionId, report))
+    .catch((error) => {
+      console.warn(
+        'omp: failed to persist session config:',
+        error instanceof Error ? error.message : error,
+      );
+    });
+  return entry.configReportQueue;
+}
+
 /**
- * Routes ONE `session/update` notification to its owning run's writer, keyed by
- * the native session id in the params. Updates for a run that is still replaying
- * history (resume) or has already finished are dropped.
+ * Routes one `session/update` notification to its owning run.
+ *
+ * OMP emits the full config array for every change. Only moved values are
+ * forwarded and persisted. Reports queue per session so async upsert building
+ * cannot publish an older config after a newer one.
  */
 function routeSessionUpdate(sessions: Map<string, OmpSessionEntry>, params: AnyRecord) {
   const sid = readSessionId(params);
@@ -483,11 +525,34 @@ function routeSessionUpdate(sessions: Map<string, OmpSessionEntry>, params: AnyR
   if (!entry || !entry.acceptingUpdates) {
     return;
   }
-  // Normalization rides on the run's entry: the runtime context is per-run, and
-  // importing sessionsService here would cycle back through the provider registry.
+
+  const changedConfig = readOmpConfigOptionUpdates(params).filter(({ configId, value }) => {
+    if (entry.configValues.get(configId) === value) {
+      return false;
+    }
+    entry.configValues.set(configId, value);
+    return true;
+  });
+  const changedValues = new Map(changedConfig.map(({ configId, value }) => [configId, value]));
+  const persisted = toPersistedConfigUpdates(changedConfig);
+  if (persisted.length > 0) {
+    void queueConfigReport(entry, sid, { source: 'live', updates: persisted });
+  }
+
   const normalized = entry.normalizeMessage(params, sid);
-  for (const msg of normalized) {
-    entry.writer.send(msg);
+  for (const message of normalized) {
+    if (
+      message.kind === 'status'
+      && message.text === 'config_option_update'
+      && (
+        typeof message.configId !== 'string'
+        || typeof message.status !== 'string'
+        || changedValues.get(message.configId) !== message.status
+      )
+    ) {
+      continue;
+    }
+    entry.writer.send(message);
   }
 }
 
@@ -976,6 +1041,9 @@ export async function spawnOmp(
         aborted: false,
         acceptingUpdates: false,
         normalizeMessage,
+        configValues: new Map(),
+        configReportQueue: Promise.resolve(),
+        recordConfigReport: context.recordSessionConfigReport,
       };
       activeOmpSessions.set(providerSessionId, entry);
     }
@@ -1049,9 +1117,20 @@ export async function spawnOmp(
         // session's mapping and transcript path together before history or usage
         // can observe the new id with the abandoned source path.
         if (appSessionId) {
+          const historyLost = resumePath.startsWith('new (history lost');
+          const selection = context.readPendingSessionSelection(appSessionId);
           sessionsDb.repointSessionToProviderSession(appSessionId, {
             providerSessionId: resolvedId,
             jsonlPath: await locateOmpSessionFile(resolvedId),
+            ...(historyLost ? {
+              resetLiveConfig: true,
+              rearmModel: selection.sessionExists
+                && Boolean(selection.model.value)
+                && selection.model.value !== OMP_CONFIGURED_MODEL_SENTINEL,
+              rearmEffort: selection.sessionExists
+                && Boolean(selection.effort.value)
+                && selection.effort.value !== 'default',
+            } : {}),
           });
         }
         if (activeOmpSessions.get(entry.sessionId) === entry) {
@@ -1078,6 +1157,9 @@ export async function spawnOmp(
         aborted: setupReservation?.aborted ?? false,
         acceptingUpdates: true,
         normalizeMessage,
+        configValues: new Map(),
+        configReportQueue: Promise.resolve(),
+        recordConfigReport: context.recordSessionConfigReport,
       };
       activeOmpSessions.set(resolvedId, entry);
       if (appSessionId && pendingOmpSetups.get(appSessionId) === setupReservation) {
@@ -1104,36 +1186,65 @@ export async function spawnOmp(
       return;
     }
 
-    // Apply per-session config (model / thinking / mode). omp config is per ACP
-    // session (not persisted by us), so this runs for both new sessions AND
-    // resume. session/new|load return configOptions with currentValues — skip a
-    // set when the session already has that value (avoids a round-trip). Each set
-    // is best-effort (non-fatal; the turn still runs if omp rejects one).
+    // Seed the config diff from session/new|load. A load snapshot can
+    // acknowledge matching dirty choices, but it never overwrites clean live
+    // state because OMP may report the primary while running on a fallback.
     const initResult = sessionResult as AnyRecord | null | undefined;
     const configOptions = Array.isArray(initResult?.configOptions) ? initResult.configOptions : [];
-    const currentConfig = (id: string) => configOptions.find((o: AnyRecord) => o?.id === id)?.currentValue;
-    const setConfig = async (configId: string, value: unknown, label: string) => {
+    const configValues = entry.configValues;
+    for (const option of configOptions) {
+      const configId = readOptionalString(option?.id);
+      const value = readOptionalString(option?.currentValue);
+      if (configId && value) {
+        configValues.set(configId, value);
+      }
+    }
+    const snapshotUpdates = toPersistedConfigUpdates(
+      [...configValues].map(([configId, value]) => ({ configId, value })),
+    );
+    if (snapshotUpdates.length > 0) {
+      await queueConfigReport(entry, resolvedId, { source: 'snapshot', updates: snapshotUpdates });
+    }
+
+    const currentConfig = (id: string) => configValues.get(id);
+    const setConfig = async (configId: string, value: string, label: string) => {
       try {
-        await connection.client.request('session/set_config_option', { sessionId: resolvedId, configId, value });
+        await connection.client.request('session/set_config_option', {
+          sessionId: resolvedId,
+          configId,
+          value,
+        });
       } catch (configError) {
-        console.warn(`omp: failed to set ${label}:`, configError instanceof Error ? configError.message : configError);
+        console.warn(
+          `omp: failed to set ${label}:`,
+          configError instanceof Error ? configError.message : configError,
+        );
       }
     };
 
-    const resolvedModel = await context.resolveResumeModel(appSessionId ?? undefined, options.model ?? undefined);
-    if (resolvedModel && resolvedModel !== OMP_CONFIGURED_MODEL_SENTINEL && resolvedModel !== currentConfig('model')) {
+    const pendingSelection = context.readPendingSessionSelection(appSessionId ?? undefined);
+    const stickySession = pendingSelection.sessionExists;
+    const resolvedModel = stickySession
+      ? (pendingSelection.model.pending ? pendingSelection.model.value : undefined)
+      : await context.resolveResumeModel(appSessionId ?? undefined, options.model ?? undefined);
+    if (
+      resolvedModel
+      && resolvedModel !== OMP_CONFIGURED_MODEL_SENTINEL
+      && resolvedModel !== currentConfig('model')
+    ) {
       await setConfig('model', resolvedModel, 'model');
     }
-    // Skip 'default' — omp rejects it ("Unknown ACP thinking level: default"),
-    // matching the codex/opencode effort handling.
-    const effort = typeof options.effort === 'string' ? options.effort.trim() : '';
+
+    const requestedEffort = typeof options.effort === 'string' ? options.effort.trim() : '';
+    const effort = stickySession
+      ? (pendingSelection.effort.pending ? pendingSelection.effort.value : '')
+      : requestedEffort;
     if (effort && effort !== 'default' && effort !== currentConfig('thinking')) {
       await setConfig('thinking', effort, 'thinking');
     }
     if (permissionMode === 'plan' && currentConfig('mode') !== 'plan') {
       await setConfig('mode', 'plan', 'plan mode');
     } else if (permissionMode !== 'plan' && currentConfig('mode') === 'plan') {
-      // Un-stick: a resumed session left in plan mode must return to default.
       await setConfig('mode', 'default', 'default mode');
     }
 
@@ -1227,6 +1338,9 @@ export async function spawnOmp(
     // + safety-nets a duplicate complete; the REST path continues to PR steps.
   } finally {
     try {
+      if (entry) {
+        await entry.configReportQueue;
+      }
       // This child now holds the session as of the jsonl it just wrote — record
       // that so only a foreign writer (the terminal) counts as drift next turn.
       // An aborted turn may sample before omp flushes after its cancel notify; the

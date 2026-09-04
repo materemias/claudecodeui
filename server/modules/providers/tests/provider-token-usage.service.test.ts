@@ -6,13 +6,14 @@ import test from 'node:test';
 
 import Database from 'better-sqlite3';
 
+import type { SessionRow } from '@/modules/database/index.js';
 import {
   createProviderTokenUsageService,
   summarizeClaudeTokenUsage,
 } from '@/modules/providers/services/provider-token-usage.service.js';
 import { AppError } from '@/shared/utils.js';
 
-function createSessionRow(overrides: Record<string, unknown> = {}) {
+function createSessionRow(overrides: Partial<SessionRow> = {}): SessionRow {
   return {
     session_id: 'app-session',
     provider: 'claude',
@@ -24,7 +25,12 @@ function createSessionRow(overrides: Record<string, unknown> = {}) {
     provider_name: null,
     model: null,
     effort: null,
+    live_model: null,
+    live_effort: null,
+    model_dirty: 0,
+    effort_dirty: 0,
     forked_from_session_id: null,
+    is_one_shot: 0,
     isArchived: 0,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',

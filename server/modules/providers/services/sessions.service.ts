@@ -32,11 +32,12 @@ type ArchivedSessionListItem = {
   updatedAt: string | null;
   lastActivity: string | null;
   isProjectArchived: boolean;
+  isOneShot: boolean;
 };
 
 type RecentSessionListItem = Pick<
   ArchivedSessionListItem,
-  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity'
+  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity' | 'isOneShot'
 >;
 
 type RecentSessionsPage = {
@@ -54,6 +55,7 @@ type SessionDetails = {
   updatedAt: string | null;
   lastActivity: string | null;
   isArchived: boolean;
+  isOneShot: boolean;
   project: {
     projectId: string;
     path: string;
@@ -123,14 +125,20 @@ export const sessionsService = {
    *
    * This is intentionally status-only: callers that only need sidebar activity
    * indicators should not attach to chat streams or request replayed messages.
+   * Each row carries `isOneShot` so the sidebar can drop transient runs without
+   * a second lookup per row.
    */
   listRunningSessions(): Array<{
     sessionId: string;
     provider: LLMProvider;
+    isOneShot: boolean;
     startedAt: number;
     lastSeq: number;
   }> {
-    return chatRunRegistry.listRunningRuns();
+    return chatRunRegistry.listRunningRuns().map((session) => ({
+      ...session,
+      isOneShot: Boolean(sessionsDb.getSessionById(session.sessionId)?.is_one_shot),
+    }));
   },
 
   /**
@@ -157,6 +165,7 @@ export const sessionsService = {
         projectDisplayName: resolveProjectDisplayName(projectPath, project?.custom_project_name),
         sessionTitle: session.custom_name?.trim() || session.session_id,
         lastActivity: session.updated_at ?? session.created_at ?? null,
+        isOneShot: Boolean(session.is_one_shot),
       };
     });
 
@@ -513,6 +522,7 @@ export const sessionsService = {
       updatedAt: session.updated_at ?? null,
       lastActivity: session.updated_at ?? session.created_at ?? null,
       isArchived: Boolean(session.isArchived),
+      isOneShot: Boolean(session.is_one_shot),
       project: project && projectPath
         ? {
             projectId: project.project_id,
@@ -556,6 +566,7 @@ export const sessionsService = {
         updatedAt: session.updated_at ?? null,
         lastActivity: session.updated_at ?? session.created_at ?? null,
         isProjectArchived: Boolean(project?.isArchived),
+        isOneShot: Boolean(session.is_one_shot),
       };
     });
   },

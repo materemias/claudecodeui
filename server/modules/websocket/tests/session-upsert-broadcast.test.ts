@@ -59,6 +59,28 @@ test('an upsert always carries the provider session id', async () => {
   });
 });
 
+test('an upsert carries one-shot classification for client-side removal', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createSession(
+      'print-session',
+      'claude',
+      '/workspace/demo',
+      'Print session',
+      undefined,
+      undefined,
+      null,
+      { isOneShot: true },
+    );
+
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+    await broadcastSessionUpserted('print-session');
+
+    const session = connection.frames[0]?.session as { isOneShot?: boolean } | undefined;
+    assert.equal(session?.isOneShot, true);
+  });
+});
+
 test('the watcher path resolves a provider-native id to the same canonical event', async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createAppSession('app-2', 'opencode', '/workspace/demo');
@@ -134,5 +156,50 @@ test('a closed socket is skipped', async () => {
 
     assert.equal(open.frames.length, 1);
     assert.deepEqual(closing.frames, []);
+  });
+});
+
+test('one failed socket send cannot block the remaining clients', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-7', 'claude', '/workspace/demo');
+    const failed = {
+      readyState: 1, // WS_OPEN_STATE
+      send(): void {
+        throw new Error('socket closed during send');
+      },
+    };
+    const healthy = new FakeConnection();
+    connectedClients.add(failed as never);
+    connectedClients.add(healthy as never);
+
+    await broadcastSessionUpserted('app-7');
+
+    assert.equal(healthy.frames.length, 1);
+  });
+});
+
+test('concurrent producers cannot publish an older selection after a provider acknowledgement', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-config', 'omp', '/workspace/demo');
+    sessionsDb.setSessionModel('app-config', 'zai/glm-5.3', true);
+
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    const mappingBroadcast = broadcastSessionUpserted('app-config');
+    await Promise.resolve();
+    sessionsDb.applySessionConfigReport('app-config', {
+      source: 'live',
+      updates: [{ field: 'model', value: 'zai/glm-5.3' }],
+    });
+    const acknowledgementBroadcast = broadcastSessionUpserted('app-config');
+    await Promise.all([mappingBroadcast, acknowledgementBroadcast]);
+
+    assert.equal(connection.frames.length, 2);
+    const finalSession = connection.frames.at(-1)?.session as {
+      selection?: { liveModel?: string | null; modelDirty?: boolean };
+    };
+    assert.equal(finalSession.selection?.liveModel, 'zai/glm-5.3');
+    assert.equal(finalSession.selection?.modelDirty, false);
   });
 });

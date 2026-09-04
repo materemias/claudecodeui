@@ -8,6 +8,7 @@ import { providerTokenUsageService } from '@/modules/providers/services/provider
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { broadcastSessionUpserted } from '@/modules/websocket/index.js';
 import type {
   CustomProviderModelInput,
   LLMProvider,
@@ -580,10 +581,23 @@ router.post(
     const sessionId = parseSessionId(req.params.sessionId);
     const model = parseSessionModelPayload(req.body);
     const stored = providerModelsService.setSessionModel(provider, sessionId, model);
+    if (stored) {
+      await broadcastSessionUpserted(sessionId);
+    }
     // A session row only exists once the gateway has allocated one. Report the
     // selection back either way so the client can hold it until the first send.
     res.json(createApiSuccessResponse(
-      stored ?? { provider, sessionId, model, effort: null, source: 'session' as const },
+      stored ?? {
+        provider,
+        sessionId,
+        model,
+        effort: null,
+        liveModel: null,
+        liveEffort: null,
+        modelDirty: false,
+        effortDirty: false,
+        source: 'session' as const,
+      },
     ));
   }),
 );
@@ -596,10 +610,20 @@ router.post(
     const sessionId = parseSessionId(req.params.sessionId);
     const effort = parseSessionEffortPayload(req.body);
     const stored = providerModelsService.setSessionEffort(provider, sessionId, effort);
+    if (stored) {
+      await broadcastSessionUpserted(sessionId);
+    }
     // Mirror active-model behavior for a composer that picked an effort just
     // before the session gateway created its row.
     res.json(createApiSuccessResponse(
-      stored ?? { provider, sessionId, effort, source: 'session' as const },
+      stored ?? {
+        provider,
+        sessionId,
+        effort,
+        liveEffort: null,
+        effortDirty: false,
+        source: 'session' as const,
+      },
     ));
   }),
 );
