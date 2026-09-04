@@ -193,6 +193,35 @@ test('bypassPermissions carries through to resumed claude sessions', () => {
   }
 });
 
+test('resumed sessions keep provider fallback separate from initialCommand', () => {
+  const spawnedCommands: string[] = [];
+  const dependencies = {
+    resolveProviderSessionId: () => 'resumed-session-id',
+    spawnPty: (_shell: string, args: string | string[]) => {
+      spawnedCommands.push(Array.isArray(args) ? args[args.length - 1] : args);
+      return createFakePty() as never;
+    },
+  };
+
+  const socket = createFakeSocket();
+  handleShellConnection(socket as never, dependencies);
+  socket.emit(
+    'message',
+    JSON.stringify({
+      type: 'init',
+      projectPath: process.cwd(),
+      sessionId: `resume-with-initial-command-${Date.now()}`,
+      hasSession: true,
+      provider: 'omp',
+      initialCommand: 'arbitrary-command',
+    }),
+  );
+
+  if (os.platform() !== 'win32') {
+    assert.deepEqual(spawnedCommands, ['omp -r "resumed-session-id" || omp']);
+  }
+});
+
 test('a missing project directory is reported as an error frame and starts no pty', () => {
   const socket = createFakeSocket();
   let spawnCount = 0;

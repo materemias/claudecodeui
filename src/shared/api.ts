@@ -205,6 +205,8 @@ export const api = {
     get(`/api/providers/sessions/recent${query({ limit, offset })}`),
   providerSessionId: (sessionId: string) =>
     get(`/api/providers/sessions/${encodeURIComponent(sessionId)}/provider-id`),
+  sessionResumeCommand: (sessionId: string, options: ApiRequestOptions = {}) =>
+    get(`/api/providers/sessions/${encodeURIComponent(sessionId)}/resume-command`, options),
   restoreSession: (sessionId: string) => post(`/api/providers/sessions/${sessionId}/restore`),
   // Creates an independent session holding this one's conversation up to
   // `upToAnchorId` (all of it when omitted). The source is left untouched.

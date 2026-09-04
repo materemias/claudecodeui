@@ -95,7 +95,11 @@
     "createProjectDesktop": "Create a new project by clicking the folder icon in the sidebar",
     "newSession": "New Session",
     "untitledSession": "Untitled Session",
-    "projectFiles": "Project Files"
+    "projectFiles": "Project Files",
+    "copyResumeCommand": "Copy resume command",
+    "resumeCommandCopied": "Resume command copied",
+    "resumeCommandFailed": "Could not copy resume command",
+    "resumeCommandPreparing": "Preparing resume command"
   },
   "fileTree": {
     "loading": "Loading files...",

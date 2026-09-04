@@ -78,6 +78,32 @@ test('session creation route names a CloudCLI session from the initial message',
   });
 });
 
+test('session resume command route builds commands for every registered provider', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    const providerCommands = [
+      ['claude', 'claude --resume "native-claude"'],
+      ['cursor', 'cursor-agent --resume="native-cursor"'],
+      ['codex', 'codex resume "native-codex"'],
+      ['opencode', 'opencode --session "native-opencode"'],
+      ['omp', 'omp -r "native-omp"'],
+    ] as const;
+
+    for (const [provider, resumeCommand] of providerCommands) {
+      const sessionId = `resume-${provider}`;
+      sessionsDb.createAppSession(sessionId, provider, workspacePath);
+      sessionsDb.assignProviderSessionId(sessionId, `native-${provider}`);
+
+      const response = await fetch(
+        `${baseUrl}/api/providers/sessions/${encodeURIComponent(sessionId)}/resume-command`,
+      );
+      const payload = await response.json() as { data?: { command?: string } };
+
+      assert.equal(response.status, 200);
+      assert.equal(payload.data?.command, `cd -- '${workspacePath}' && ${resumeCommand}`);
+    }
+  });
+});
+
 test('conversation search streams title matches before transcript results', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     sessionsDb.createAppSession(

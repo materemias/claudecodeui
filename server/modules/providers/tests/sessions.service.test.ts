@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { closeConnection, getConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
@@ -83,6 +83,51 @@ test('provider session id reports a missing app session', { concurrency: false }
       (error: unknown) => {
         const typedError = error as { code?: string; statusCode?: number };
         return typedError.code === 'SESSION_NOT_FOUND' && typedError.statusCode === 404;
+      },
+    );
+  });
+});
+
+test('terminal resume commands quote project paths and use the mapped native id', { concurrency: false }, async () => {
+  await withIsolatedDatabase(() => {
+    const projectPath = "/tmp/project's path";
+    sessionsDb.createAppSession('omp-app-session', 'omp', projectPath);
+    sessionsDb.assignProviderSessionId('omp-app-session', 'omp-native-session');
+
+    assert.equal(
+      sessionsService.getTerminalResumeCommand('omp-app-session'),
+      "cd -- '/tmp/project'\\''s path' && omp -r \"omp-native-session\"",
+    );
+  });
+});
+
+test('terminal resume command is unavailable before a provider native id exists', { concurrency: false }, async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('pending-terminal-session', 'claude', '/tmp/project');
+
+    assert.throws(
+      () => sessionsService.getTerminalResumeCommand('pending-terminal-session'),
+      (error: unknown) => {
+        const typedError = error as { code?: string; statusCode?: number };
+        return typedError.code === 'SESSION_RESUME_UNAVAILABLE' && typedError.statusCode === 409;
+      },
+    );
+  });
+});
+
+test('terminal resume command is unavailable without a project path', { concurrency: false }, async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('missing-project-path-session', 'claude', '/tmp/project');
+    sessionsDb.assignProviderSessionId('missing-project-path-session', 'claude-native-session');
+    getConnection()
+      .prepare('UPDATE sessions SET project_path = NULL WHERE session_id = ?')
+      .run('missing-project-path-session');
+
+    assert.throws(
+      () => sessionsService.getTerminalResumeCommand('missing-project-path-session'),
+      (error: unknown) => {
+        const typedError = error as { code?: string; statusCode?: number };
+        return typedError.code === 'SESSION_PROJECT_PATH_UNAVAILABLE' && typedError.statusCode === 409;
       },
     );
   });
