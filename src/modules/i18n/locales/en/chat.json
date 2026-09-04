@@ -137,6 +137,9 @@
     "model": "Model",
     "effortDefault": "Default",
     "loadingModels": "Loading models…",
+    "searchModels": "Search models…",
+    "noModelMatches": "No models match “{{query}}”",
+    "showMoreModels": "Show more models",
     "modelMenu": "Select model and reasoning effort",
     "permissionHeading": "How should {{provider}} actions be approved?",
     "editing": {

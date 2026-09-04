@@ -220,6 +220,9 @@
     "forkFromHere": "Dupliquer à partir d’ici"
   },
   "composer": {
+    "searchModels": "Rechercher des modèles…",
+    "noModelMatches": "Aucun modèle ne correspond à « {{query}} »",
+    "showMoreModels": "Afficher plus de modèles",
     "editing": {
       "title": "Remplacement d’un message précédent",
       "filesNotReverted": "les fichiers déjà modifiés ne sont pas restaurés",
