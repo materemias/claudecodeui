@@ -4,6 +4,10 @@ import { useLocation } from 'react-router-dom';
 import { QuickSettingsPanel } from '@/modules/quick-settings-panel';
 import { useProjectSidebarState } from '@/modules/project-workspace/context/ProjectsStateContext';
 import ProjectEffects from '@/modules/project-workspace/controllers/ProjectEffects';
+import {
+  useRecentWebSessions,
+  useTerminalRunningSessions,
+} from '@/shared/context/SessionProtectionContext';
 import type { ProjectWorkspaceShellProps } from '@/shared/types';
 import ProjectCommandPalette from '@/modules/project-workspace/ProjectCommandPalette';
 import ProjectMainRegion from '@/modules/project-workspace/ProjectMainRegion';
@@ -28,6 +32,8 @@ function ProjectWorkspaceShell({
     setSidebarOpen,
     locationKey,
   });
+  const terminalRunningSessions = useTerminalRunningSessions();
+  const recentWebSessions = useRecentWebSessions();
 
   return (
     <div
@@ -35,7 +41,11 @@ function ProjectWorkspaceShell({
       style={{ bottom: 'var(--keyboard-height, 0px)' }}
     >
       <ProjectEffects navigate={navigate} />
-      <ProjectSidebarRegion isMobile={isMobile} />
+      <ProjectSidebarRegion
+        isMobile={isMobile}
+        terminalRunningSessions={terminalRunningSessions}
+        recentWebSessions={recentWebSessions}
+      />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <ProjectMainRegion

@@ -7,8 +7,20 @@ import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPrefere
 import { useSidebarController } from '@/modules/sidebar/hooks/useSidebarController';
 import { useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import { usePaletteOps } from '@/modules/command-palette';
-import { useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
-import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSession, SidebarProjectListProps } from '@/shared/types';
+import {
+  useBusySessionIdSet,
+  useSessionProtectionActions,
+} from '@/shared/context/SessionProtectionContext';
+import type {
+  LLMProvider,
+  LoadingProgress,
+  MCPServerStatus,
+  Project,
+  ProjectSession,
+  RecentWebSessionMap,
+  SidebarProjectListProps,
+  TerminalRunningSessionMap,
+} from '@/shared/types';
 import SidebarCollapsed from '@/modules/sidebar/SidebarCollapsed';
 import SidebarContent from '@/modules/sidebar/SidebarContent';
 import SidebarModals from '@/modules/sidebar/SidebarModals';
@@ -17,12 +29,15 @@ type SidebarProps = {
   projects: Project[];
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
+  terminalRunningSessions: TerminalRunningSessionMap;
+  recentWebSessions: RecentWebSessionMap;
   attentionSessionIds: ReadonlySet<string>;
   onProjectSelect: (project: Project) => void;
   onSessionSelect: (session: ProjectSession) => void;
   onNewSession: (project: Project) => void;
   onSessionDelete?: (sessionId: string) => void;
   onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
+  onHydrateRunningSessions: (sessionIds: ReadonlySet<string>) => Promise<void>;
   // `projectId` is the DB identifier; the sidebar hands it back to the parent
   // when the delete flow completes.
   onProjectDelete?: (projectId: string) => void;
@@ -46,12 +61,15 @@ function Sidebar({
   projects,
   selectedProject,
   selectedSession,
+  terminalRunningSessions,
+  recentWebSessions,
   attentionSessionIds,
   onProjectSelect,
   onSessionSelect,
   onNewSession,
   onSessionDelete,
   onLoadMoreSessions,
+  onHydrateRunningSessions,
   onProjectDelete,
   isLoading,
   loadingProgress,
@@ -78,6 +96,7 @@ function Sidebar({
   // would re-render the whole tree on every provider status frame.
   const activeSessions = useBusySessionIdSet();
 
+  const { refreshRunningSessions } = useSessionProtectionActions();
   const {
     isSidebarCollapsed,
     isProjectExpanded,
@@ -145,6 +164,8 @@ function Sidebar({
     selectedProject,
     selectedSession,
     activeSessions,
+    terminalRunningSessions,
+    recentWebSessions,
     isLoading,
     isMobile,
     t,
@@ -154,6 +175,8 @@ function Sidebar({
     onNewSession,
     onSessionDelete,
     onLoadMoreSessions,
+    onHydrateRunningSessions,
+    refreshRunningSessions,
     onProjectDelete,
     setCurrentProject,
     setSidebarVisible: (visible) => setPreference('sidebarVisible', visible),
@@ -203,6 +226,7 @@ function Sidebar({
     getProjectSessions,
     loadingMoreProjects,
     activeSessions,
+    terminalRunningSessions,
     attentionSessionIds,
     isProjectStarred,
     onRenameDraftChange: updateRenameDraft,

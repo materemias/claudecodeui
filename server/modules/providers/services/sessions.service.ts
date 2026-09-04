@@ -6,11 +6,13 @@ import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
+import { localAgentSessionsService } from '@/modules/providers/services/local-agent-sessions.service.js';
 import type {
   FetchHistoryOptions,
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  RunningSession,
 } from '@/shared/types.js';
 import { AppError, buildCloudCliSessionName, sliceTailPage } from '@/shared/utils.js';
 
@@ -121,24 +123,54 @@ export const sessionsService = {
   },
 
   /**
-   * Returns app-facing ids for provider runs that are currently processing.
-   *
-   * This is intentionally status-only: callers that only need sidebar activity
-   * indicators should not attach to chat streams or request replayed messages.
-   * Each row carries `isOneShot` so the sidebar can drop transient runs without
-   * a second lookup per row.
+   * Returns CloudCLI runs completed within four hours, active CloudCLI runs,
+   * and supported provider CLIs attached to a host terminal. Active sources
+   * win when rows share a stable app session id, and processing wins over a
+   * terminal row so callers keep Web UI interruption state. Each row reports
+   * the `isOneShot` flag stored for its run, so the sidebar can drop transient
+   * runs without a second lookup per row.
    */
-  listRunningSessions(): Array<{
-    sessionId: string;
-    provider: LLMProvider;
-    isOneShot: boolean;
-    startedAt: number;
-    lastSeq: number;
-  }> {
-    return chatRunRegistry.listRunningRuns().map((session) => ({
-      ...session,
-      isOneShot: Boolean(sessionsDb.getSessionById(session.sessionId)?.is_one_shot),
-    }));
+  listRunningSessions(): RunningSession[] {
+    const sessions = new Map<string, RunningSession>();
+
+    for (const session of localAgentSessionsService.listRunningSessions()) {
+      const row = sessionsDb.getSessionById(session.sessionId);
+      sessions.set(session.sessionId, {
+        ...session,
+        isOneShot: session.isOneShot ?? Boolean(row?.is_one_shot),
+      });
+    }
+    for (const session of chatRunRegistry.listRecentlyCompletedRuns()) {
+      if (sessions.has(session.sessionId)) {
+        continue;
+      }
+
+      const row = sessionsDb.getSessionById(session.sessionId);
+      const project = row?.project_path ? projectsDb.getProjectPath(row.project_path) : null;
+      if (!row || row.isArchived || !project || project.isArchived) {
+        continue;
+      }
+
+      sessions.set(session.sessionId, {
+        ...session,
+        source: 'recent',
+        projectId: project.project_id,
+        sessionTitle: row.custom_name?.trim() || row.session_id,
+        lastActivity: row.updated_at ?? row.created_at ?? null,
+        isOneShot: Boolean(row.is_one_shot),
+        lastSeq: 0,
+      });
+    }
+    for (const session of chatRunRegistry.listRunningRuns()) {
+      const row = sessionsDb.getSessionById(session.sessionId);
+      sessions.set(session.sessionId, {
+        ...session,
+        source: 'processing',
+        isOneShot: Boolean(row?.is_one_shot),
+      });
+    }
+
+    return [...sessions.values()];
   },
 
   /**

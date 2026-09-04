@@ -2,7 +2,7 @@ import { Plus } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '@/shared/ui';
-import type { LLMProvider, Project, ProjectSession, SessionWithProvider } from '@/shared/types';
+import type { LLMProvider, Project, ProjectSession, SessionWithProvider, TerminalRunningSessionMap } from '@/shared/types';
 import SidebarSessionItem from '@/modules/sidebar/SidebarSessionItem';
 
 type SidebarProjectSessionsProps = {
@@ -14,6 +14,7 @@ type SidebarProjectSessionsProps = {
   hasMoreSessions: boolean;
   isLoadingMoreSessions: boolean;
   activeSessions: ReadonlySet<string>;
+  terminalRunningSessions: TerminalRunningSessionMap;
   attentionSessionIds: ReadonlySet<string>;
   currentTime: Date;
   /** The session being renamed, when it belongs to this project. */
@@ -60,6 +61,7 @@ export default function SidebarProjectSessions({
   hasMoreSessions,
   isLoadingMoreSessions,
   activeSessions,
+  terminalRunningSessions,
   attentionSessionIds,
   currentTime,
   sessionRenameId,
@@ -108,6 +110,7 @@ export default function SidebarProjectSessions({
               session={session}
               selectedSession={selectedSession}
               isProcessing={activeSessions.has(session.id)}
+              isTerminal={terminalRunningSessions.get(session.id)?.provider === session.__provider}
               needsAttention={attentionSessionIds.has(session.id)}
               currentTime={currentTime}
               onRenameDraftChange={onRenameDraftChange}

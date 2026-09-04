@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, RecentWebSessionMap, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, TerminalRunningSessionMap } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -45,6 +45,8 @@ type UseSidebarControllerArgs = {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
   activeSessions: ReadonlySet<string>;
+  terminalRunningSessions: TerminalRunningSessionMap;
+  recentWebSessions: RecentWebSessionMap;
   isLoading: boolean;
   isMobile: boolean;
   t: TFunction;
@@ -54,6 +56,8 @@ type UseSidebarControllerArgs = {
   onNewSession: (project: Project) => void;
   onSessionDelete?: (sessionId: string) => void;
   onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
+  onHydrateRunningSessions: (sessionIds: ReadonlySet<string>) => Promise<void>;
+  refreshRunningSessions: () => Promise<ReadonlySet<string> | null>;
   // `projectId` is the DB-assigned identifier; callbacks use that post-migration.
   onProjectDelete?: (projectId: string) => void;
   setCurrentProject: (project: Project) => void;
@@ -61,11 +65,79 @@ type UseSidebarControllerArgs = {
   sidebarVisible: boolean;
 };
 
+/** Used by the sidebar controller and its pagination regression test to build the complete Running view. */
+export function buildRunningProjects(
+  projects: Project[],
+  runningSessionIds: ReadonlySet<string>,
+  recentWebSessions: RecentWebSessionMap,
+  projectSortOrder: ProjectSortOrder,
+): Project[] {
+  if (runningSessionIds.size === 0) {
+    return [];
+  }
+
+  const recentSessionsByProject = new Map<string, ProjectSession[]>();
+  for (const session of recentWebSessions.values()) {
+    if (session.isOneShot === true) {
+      continue;
+    }
+
+    const projectSessions = recentSessionsByProject.get(session.projectId) ?? [];
+    const retainedSession: ProjectSession = {
+      id: session.sessionId,
+      summary: session.sessionTitle,
+      lastActivity: session.lastActivity ?? undefined,
+      provider: session.provider,
+      __provider: session.provider,
+      __projectId: session.projectId,
+    };
+    if (typeof session.isOneShot === 'boolean') {
+      retainedSession.isOneShot = session.isOneShot;
+    }
+    projectSessions.push(retainedSession);
+    recentSessionsByProject.set(session.projectId, projectSessions);
+  }
+
+  const projectsWithRunningSessions = projects.reduce<Project[]>((acc, project) => {
+    const sessions = (project.sessions ?? []).filter(
+      (session) =>
+        session.isOneShot !== true
+        && runningSessionIds.has(String(session.id)),
+    );
+    const sessionIds = new Set(sessions.map((session) => String(session.id)));
+
+    for (const session of recentSessionsByProject.get(project.projectId) ?? []) {
+      if (!sessionIds.has(session.id)) {
+        sessions.push(session);
+      }
+    }
+
+    if (sessions.length === 0) {
+      return acc;
+    }
+
+    acc.push({
+      ...project,
+      sessions,
+      sessionMeta: {
+        ...project.sessionMeta,
+        total: sessions.length,
+        hasMore: false,
+      },
+    });
+    return acc;
+  }, []);
+
+  return sortProjects(projectsWithRunningSessions, projectSortOrder);
+}
+
 export function useSidebarController({
   projects,
   selectedProject,
   selectedSession: _selectedSession,
   activeSessions,
+  terminalRunningSessions,
+  recentWebSessions,
   isLoading,
   isMobile,
   t,
@@ -75,6 +147,8 @@ export function useSidebarController({
   onNewSession,
   onSessionDelete,
   onLoadMoreSessions,
+  onHydrateRunningSessions,
+  refreshRunningSessions,
   onProjectDelete,
   setCurrentProject,
   setSidebarVisible,
@@ -122,8 +196,23 @@ export function useSidebarController({
   const onRefreshRef = useRef(onRefresh);
 
   const isSidebarCollapsed = !isMobile && !sidebarVisible;
-  const activeSessionIds = activeSessions;
-  const runningSessionsCount = activeSessionIds.size;
+  const runningSessionIds = useMemo(() => {
+    const sessionIds = new Set(activeSessions);
+    for (const sessionId of terminalRunningSessions.keys()) {
+      sessionIds.add(sessionId);
+    }
+    for (const sessionId of recentWebSessions.keys()) {
+      sessionIds.add(sessionId);
+    }
+    return sessionIds;
+  }, [activeSessions, recentWebSessions, terminalRunningSessions]);
+  const runningSessionsCount = runningSessionIds.size;
+
+  useEffect(() => {
+    if (!isLoading && runningSessionIds.size > 0) {
+      void onHydrateRunningSessions(runningSessionIds);
+    }
+  }, [isLoading, onHydrateRunningSessions, runningSessionIds]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -690,32 +779,20 @@ export function useSidebarController({
     [projectSortOrder, projectsWithResolvedStarState],
   );
 
-  const runningProjects = useMemo(() => {
-    if (activeSessionIds.size === 0) {
-      return [];
-    }
-
-    return sortedProjects.reduce<Project[]>((acc, project) => {
-      const sessions = (project.sessions ?? []).filter((session) =>
-        session.isOneShot !== true && activeSessionIds.has(String(session.id)));
-      const runningCount = sessions.length;
-
-      if (runningCount === 0) {
-        return acc;
-      }
-
-      acc.push({
-        ...project,
-        sessions,
-        sessionMeta: {
-          ...project.sessionMeta,
-          total: runningCount,
-          hasMore: false,
-        },
-      });
-      return acc;
-    }, []);
-  }, [activeSessionIds, sortedProjects]);
+  const runningProjects = useMemo(
+    () => buildRunningProjects(
+      projectsWithResolvedStarState,
+      runningSessionIds,
+      recentWebSessions,
+      projectSortOrder,
+    ),
+    [
+      projectSortOrder,
+      projectsWithResolvedStarState,
+      recentWebSessions,
+      runningSessionIds,
+    ],
+  );
 
   const filteredProjects = useMemo(
     () => filterProjects(searchMode === 'running' ? runningProjects : sortedProjects, debouncedSearchQuery),
@@ -993,8 +1070,10 @@ export function useSidebarController({
   const refreshProjects = useCallback(async () => {
     setIsRefreshing(true);
     try {
+      const refreshedSessionIds = await refreshRunningSessions();
       await Promise.all([
         Promise.resolve(onRefresh()),
+        onHydrateRunningSessions(refreshedSessionIds ?? runningSessionIds),
         fetchArchivedSessions(),
         searchMode === 'conversations'
           ? fetchRecentConversationsPage(0, false)
@@ -1003,7 +1082,15 @@ export function useSidebarController({
     } finally {
       setIsRefreshing(false);
     }
-  }, [fetchArchivedSessions, fetchRecentConversationsPage, onRefresh, searchMode]);
+  }, [
+    fetchArchivedSessions,
+    fetchRecentConversationsPage,
+    onHydrateRunningSessions,
+    onRefresh,
+    refreshRunningSessions,
+    runningSessionIds,
+    searchMode,
+  ]);
 
   const updateSessionSummary = useCallback(
     // `_projectId` and `_provider` are preserved for compatibility with

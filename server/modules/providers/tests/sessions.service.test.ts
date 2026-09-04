@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { closeConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { localAgentSessionsService } from '@/modules/providers/services/local-agent-sessions.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 
@@ -28,6 +29,131 @@ async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promis
     await rm(tempDirectory, { recursive: true, force: true });
   }
 }
+
+test('running sessions hydrate recent rows and prefer active sources by canonical id', { concurrency: false }, async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession(
+      'recent-web-session',
+      'cursor',
+      '/workspace/recent-project',
+      'Retained title',
+    );
+    const recentRow = sessionsDb.getSessionById('recent-web-session');
+    sessionsDb.createAppSession(
+      'archived-session',
+      'claude',
+      '/workspace/recent-project',
+      'Archived title',
+    );
+    sessionsDb.updateSessionIsArchived('archived-session', true);
+    const recentProject = projectsDb.getProjectPath('/workspace/recent-project');
+    assert.ok(recentRow);
+    assert.ok(recentProject);
+
+    const originalRunningRuns = chatRunRegistry.listRunningRuns;
+    const originalRecentlyCompletedRuns = chatRunRegistry.listRecentlyCompletedRuns;
+    const originalTerminalSessions = localAgentSessionsService.listRunningSessions;
+
+    chatRunRegistry.listRunningRuns = () => [
+      {
+        sessionId: 'shared-session',
+        provider: 'codex',
+        startedAt: 100,
+        lastSeq: 7,
+      },
+      {
+        sessionId: 'web-session',
+        provider: 'claude',
+        startedAt: 200,
+        lastSeq: 2,
+      },
+    ];
+    chatRunRegistry.listRecentlyCompletedRuns = () => [
+      {
+        sessionId: 'terminal-session',
+        provider: 'omp',
+        completedAt: 300,
+      },
+      {
+        sessionId: 'shared-session',
+        provider: 'codex',
+        completedAt: 400,
+      },
+      {
+        sessionId: 'recent-web-session',
+        provider: 'cursor',
+        completedAt: 500,
+      },
+      {
+        sessionId: 'deleted-session',
+        provider: 'claude',
+        completedAt: 600,
+      },
+      {
+        sessionId: 'archived-session',
+        provider: 'claude',
+        completedAt: 700,
+      },
+    ];
+    localAgentSessionsService.listRunningSessions = () => [
+      {
+        sessionId: 'terminal-session',
+        provider: 'omp',
+        source: 'terminal',
+        lastSeq: 0,
+      },
+      {
+        sessionId: 'shared-session',
+        provider: 'codex',
+        source: 'terminal',
+        lastSeq: 0,
+      },
+    ];
+
+    try {
+      assert.deepEqual(sessionsService.listRunningSessions(), [
+        {
+          sessionId: 'terminal-session',
+          provider: 'omp',
+          source: 'terminal',
+          isOneShot: false,
+          lastSeq: 0,
+        },
+        {
+          sessionId: 'shared-session',
+          provider: 'codex',
+          source: 'processing',
+          isOneShot: false,
+          startedAt: 100,
+          lastSeq: 7,
+        },
+        {
+          sessionId: 'recent-web-session',
+          provider: 'cursor',
+          source: 'recent',
+          projectId: recentProject.project_id,
+          sessionTitle: 'Retained title',
+          lastActivity: recentRow.updated_at ?? recentRow.created_at ?? null,
+          completedAt: 500,
+          isOneShot: false,
+          lastSeq: 0,
+        },
+        {
+          sessionId: 'web-session',
+          provider: 'claude',
+          source: 'processing',
+          isOneShot: false,
+          startedAt: 200,
+          lastSeq: 2,
+        },
+      ]);
+    } finally {
+      chatRunRegistry.listRunningRuns = originalRunningRuns;
+      chatRunRegistry.listRecentlyCompletedRuns = originalRecentlyCompletedRuns;
+      localAgentSessionsService.listRunningSessions = originalTerminalSessions;
+    }
+  });
+});
 
 test('provider session id returns the mapped native id', { concurrency: false }, async () => {
   await withIsolatedDatabase(() => {
