@@ -239,6 +239,9 @@
     "forkFromHere": "从此处派生"
   },
   "composer": {
+    "searchModels": "搜索模型…",
+    "noModelMatches": "没有与“{{query}}”匹配的模型",
+    "showMoreModels": "显示更多模型",
     "editing": {
       "title": "正在替换先前的消息",
       "filesNotReverted": "已修改的文件不会被还原",

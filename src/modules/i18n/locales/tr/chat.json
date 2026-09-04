@@ -218,6 +218,9 @@
     "forkFromHere": "Buradan çatalla"
   },
   "composer": {
+    "searchModels": "Model ara…",
+    "noModelMatches": "“{{query}}” ile eşleşen model yok",
+    "showMoreModels": "Daha fazla model göster",
     "editing": {
       "title": "Önceki bir mesaj değiştiriliyor",
       "filesNotReverted": "zaten değiştirilen dosyalar geri alınmaz",

@@ -75,6 +75,7 @@ type ProviderCapabilities = {
   supportsEffort?: boolean;
   supportsMessageEditing?: boolean;
   supportsSessionForking?: boolean;
+  groupsModelsByProvider: boolean;
 };
 
 type ProviderCapabilitiesApiResponse = {
@@ -722,6 +723,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     () => providerModelCatalog[provider]?.OPTIONS ?? FALLBACK_MODEL_OPTIONS[provider] ?? [],
     [provider, providerModelCatalog],
   );
+  const groupsModelsByProvider = providerCapabilities?.[provider]?.groupsModelsByProvider ?? false;
 
   const applyProviderCatalog = useCallback((
     targetProvider: LLMProvider,
@@ -832,6 +834,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     currentProviderEffortOptions,
     currentProviderModel,
     currentProviderModelOptions,
+    groupsModelsByProvider,
     permissionMode,
     pendingPermissionRequests,
     setPendingPermissionRequests,

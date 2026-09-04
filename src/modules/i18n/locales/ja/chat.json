@@ -205,6 +205,9 @@
     "forkFromHere": "ここから分岐"
   },
   "composer": {
+    "searchModels": "モデルを検索…",
+    "noModelMatches": "「{{query}}」に一致するモデルはありません",
+    "showMoreModels": "さらにモデルを表示",
     "editing": {
       "title": "以前のメッセージを置き換えています",
       "filesNotReverted": "変更済みのファイルは元に戻りません",

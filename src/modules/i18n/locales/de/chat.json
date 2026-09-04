@@ -218,6 +218,9 @@
     "forkFromHere": "Ab hier verzweigen"
   },
   "composer": {
+    "searchModels": "Modelle durchsuchen…",
+    "noModelMatches": "Keine Modelle entsprechen „{{query}}“",
+    "showMoreModels": "Weitere Modelle anzeigen",
     "editing": {
       "title": "Ersetzt eine frühere Nachricht",
       "filesNotReverted": "bereits geänderte Dateien werden nicht zurückgesetzt",

@@ -136,6 +136,9 @@
     "model": "Modelo",
     "effortDefault": "Por defecto",
     "loadingModels": "Cargando modelos…",
+    "searchModels": "Buscar modelos…",
+    "noModelMatches": "Ningún modelo coincide con «{{query}}»",
+    "showMoreModels": "Mostrar más modelos",
     "modelMenu": "Seleccionar modelo y esfuerzo de razonamiento",
     "permissionHeading": "¿Cómo se deben aprobar las acciones de {{provider}}?",
     "editing": {
