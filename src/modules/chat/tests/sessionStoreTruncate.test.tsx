@@ -60,6 +60,65 @@ async function loadedStore() {
   return view;
 }
 
+describe('history request ownership', () => {
+  it('does not apply a page after its transcript generation is retired', async () => {
+    sessionMessages.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { messages: HISTORY.slice(2), total: HISTORY.length, hasMore: true },
+      }),
+    });
+
+    const { useSessionStore } = await import('@/modules/chat/hooks/useSessionStore');
+    const view = renderHook(() => useSessionStore());
+    await act(async () => {
+      await view.result.current.fetchFromServer('session-1', { limit: 2, offset: 0 });
+    });
+
+    type HistoryResponse = {
+      ok: boolean;
+      json: () => Promise<{
+        data: { messages: NormalizedMessage[]; total: number; hasMore: boolean };
+      }>;
+    };
+    let resolvePage!: (value: HistoryResponse) => void;
+    const page = new Promise<HistoryResponse>((resolve) => {
+      resolvePage = resolve;
+    });
+    sessionMessages.mockReturnValueOnce(page);
+
+    let ownsRequest = true;
+    let request!: Promise<unknown>;
+    await act(async () => {
+      request = view.result.current.fetchMore('session-1', {
+        limit: 2,
+        canRequest: () => ownsRequest,
+      });
+      await Promise.resolve();
+    });
+
+    ownsRequest = false;
+    await act(async () => {
+      resolvePage({
+        ok: true,
+        json: async () => ({
+          data: {
+            messages: HISTORY.slice(0, 2),
+            total: HISTORY.length,
+            hasMore: false,
+          },
+        }),
+      });
+      await request;
+    });
+
+    assert.deepEqual(
+      view.result.current.getMessages('session-1').map((message) => message.content),
+      ['second prompt', 'second answer'],
+    );
+  });
+});
+
 describe('truncateAt', () => {
   it('drops the anchored message and everything after it', async () => {
     const { result } = await loadedStore();

@@ -55,7 +55,6 @@ const submit = async (provider: LLMProvider) => {
       sendMessage: (message) => {
         sent.push(message as SentMessage);
       },
-      scrollToBottom: () => undefined,
       addMessage: () => undefined,
       setIsUserScrolledUp: () => undefined,
       setPendingPermissionRequests: () => undefined,
