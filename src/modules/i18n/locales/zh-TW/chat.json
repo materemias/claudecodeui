@@ -110,7 +110,9 @@
     "clickToChangeMode": "點擊變更權限模式（或在輸入框中按 Tab）",
     "showAllCommands": "顯示所有指令",
     "clearInput": "清空輸入",
-    "scrollToBottom": "捲動到底部"
+    "scrollToBottom": "捲動到底部",
+    "previousUserTurn": "上一個使用者回合",
+    "nextUserTurn": "下一個使用者回合"
   },
   "thinkingMode": {
     "selector": {

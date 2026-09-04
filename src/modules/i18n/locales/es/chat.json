@@ -122,6 +122,8 @@
     "showAllCommands": "Mostrar todos los comandos",
     "clearInput": "Limpiar entrada",
     "scrollToBottom": "Ir al final",
+    "previousUserTurn": "Turno anterior del usuario",
+    "nextUserTurn": "Siguiente turno del usuario",
     "queue": {
       "sendNext": "Poner en cola el siguiente mensaje",
       "update": "Actualizar mensaje en cola",

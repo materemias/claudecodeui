@@ -122,6 +122,8 @@
     "showAllCommands": "显示所有命令",
     "clearInput": "清空输入",
     "scrollToBottom": "滚动到底部",
+    "previousUserTurn": "上一个用户回合",
+    "nextUserTurn": "下一个用户回合",
     "queue": {
       "sendNext": "排队发送下一条消息",
       "update": "更新排队消息",

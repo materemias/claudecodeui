@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDownIcon } from 'lucide-react';
+import { ArrowDownIcon, ChevronDownIcon, ChevronUpIcon, Loader2Icon } from 'lucide-react';
 
 import { useTasksSettings } from '@/modules/task-master';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
@@ -26,6 +26,8 @@ import {
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import CommandResultModal from '@/modules/chat/modals/CommandResultModal';
+
+const TURN_NAV_BUTTON_CLASS = 'pointer-events-auto flex h-8 w-8 touch-manipulation items-center justify-center rounded-full border border-border/50 bg-card text-muted-foreground shadow-sm transition-all duration-200 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50';
 
 type ChatInterfaceProps = {
   isActive: boolean;
@@ -147,6 +149,8 @@ function ChatInterface({
     scrollToBottomAndReset,
     handleScroll,
     requestLatestMessages,
+    navigateUserTurn,
+    navigatingUserTurn,
   } = useChatSessionState({
     isActive,
     selectedProject,
@@ -437,6 +441,44 @@ function ChatInterface({
         />
 
         <div className="relative flex-shrink-0">
+          {chatMessages.length > 0 && (
+            <div
+              className="pointer-events-none absolute bottom-full right-2 z-20 mb-11 flex flex-col gap-1 sm:right-4"
+              aria-busy={navigatingUserTurn !== null}
+            >
+              <button
+                type="button"
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() => void navigateUserTurn('previous')}
+                disabled={navigatingUserTurn !== null}
+                aria-label={t('input.previousUserTurn', { defaultValue: 'Previous user turn' })}
+                title={t('input.previousUserTurn', { defaultValue: 'Previous user turn' })}
+                className={TURN_NAV_BUTTON_CLASS}
+              >
+                {navigatingUserTurn === 'previous' ? (
+                  <Loader2Icon className="h-4 w-4 animate-spin" aria-hidden />
+                ) : (
+                  <ChevronUpIcon className="h-4 w-4" aria-hidden />
+                )}
+              </button>
+              <button
+                type="button"
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() => void navigateUserTurn('next')}
+                disabled={navigatingUserTurn !== null}
+                aria-label={t('input.nextUserTurn', { defaultValue: 'Next user turn' })}
+                title={t('input.nextUserTurn', { defaultValue: 'Next user turn' })}
+                className={TURN_NAV_BUTTON_CLASS}
+              >
+                {navigatingUserTurn === 'next' ? (
+                  <Loader2Icon className="h-4 w-4 animate-spin" aria-hidden />
+                ) : (
+                  <ChevronDownIcon className="h-4 w-4" aria-hidden />
+                )}
+              </button>
+            </div>
+          )}
+
           {isUserScrolledUp && chatMessages.length > 0 && (
             <div className="pointer-events-none absolute -top-11 left-0 right-0 z-20 flex justify-center">
               <button
