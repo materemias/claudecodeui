@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { OMP_ADVISOR_SIDECAR_PATTERN } from '@/modules/providers/list/omp/omp-session-files.js';
 import {
   buildCloudCliSessionName,
   findFilesRecursivelyCreatedAfter,
@@ -30,6 +31,24 @@ type ParsedSession = {
 const UNTITLED = 'Untitled omp Session';
 const MAIN_MODEL_ROLES = new Set(['default', 'temporary', 'fallback']);
 const REPLACED_MODEL_STOP_REASON = 'error';
+
+/**
+ * Maps `<ts>_<id>/__advisor.<name>.jsonl` back to the `<ts>_<id>.jsonl` that
+ * owns it, deriving the owner the same way the history reader derives the
+ * sidecar directory from a main transcript path: by the `.jsonl` suffix alone.
+ * Nothing here may assume a shape for the native id — the header parser accepts
+ * whatever omp wrote, and an id-shaped guard here would silently deny those
+ * sessions the broadcast. An existing owning transcript is the whole condition,
+ * so unrelated `__` files stay ignored.
+ */
+function resolveOmpSidecarParent(filePath: string): string | null {
+  if (!OMP_ADVISOR_SIDECAR_PATTERN.test(path.basename(filePath))) {
+    return null;
+  }
+
+  const parentTranscript = `${path.dirname(filePath)}.jsonl`;
+  return fs.existsSync(parentTranscript) ? parentTranscript : null;
+}
 
 // omp asks its title model for this wrapper. A failed extraction can persist
 // the opening tag by itself, so remove wrappers from auto-generated titles.
@@ -78,6 +97,143 @@ function readProvisionalSessionName(entry: Record<string, unknown>): string | un
 }
 
 /**
+ * Accumulated live-config state for one transcript, plus how much of that file
+ * it already covers.
+ *
+ * The scan reports the LAST model in the file, so it cannot stop early: it used
+ * to re-read and re-parse the whole transcript on every watcher tick — 186ms of
+ * event-loop time for a live 51MB session — and `onUpdate` awaits it before the
+ * `session_upserted` broadcast, which is the only channel keeping the UI in sync
+ * with disk. omp only ever appends, so the state carries forward and each tick
+ * folds in just the bytes appended since the previous one.
+ */
+type LiveConfigScan = {
+  /**
+   * The transcript this state was accumulated from. A path can be reused by a
+   * different session, and a replacement merely longer than the old cursor
+   * would otherwise be resumed into the middle of.
+   */
+  device: number;
+  inode: number;
+  /** Absolute offset one past the last newline-terminated line folded in. */
+  cursor: number;
+  lineNumber: number;
+  lastMainModel: { line: number; value: string } | null;
+  lastAssistantModel: { line: number; value: string } | null;
+  liveEffort: string | null;
+  prefixedModelByBareId: Map<string, string>;
+};
+
+/** Bounded so a long-lived server cannot retain state for every transcript it ever touched. */
+const MAX_LIVE_CONFIG_SCANS = 256;
+const liveConfigScans = new Map<string, LiveConfigScan>();
+const EMPTY_LINE_CARRY = Buffer.alloc(0);
+
+function rememberLiveConfigScan(filePath: string, scan: LiveConfigScan): void {
+  // Re-inserting makes this the most recently used entry.
+  liveConfigScans.delete(filePath);
+  liveConfigScans.set(filePath, scan);
+  for (const oldest of liveConfigScans.keys()) {
+    if (liveConfigScans.size <= MAX_LIVE_CONFIG_SCANS) {
+      break;
+    }
+    liveConfigScans.delete(oldest);
+  }
+}
+
+/**
+ * Folds one transcript line into the accumulating live-config state.
+ *
+ * Separate from the scan loop because an unterminated final record is folded
+ * into a throwaway copy rather than into the state that is retained.
+ */
+function foldLiveConfigLine(scan: LiveConfigScan, line: string): void {
+  scan.lineNumber += 1;
+  let entry: Record<string, unknown> | null;
+  try {
+    entry = readObjectRecord(JSON.parse(line));
+  } catch {
+    return;
+  }
+  if (!entry) {
+    return;
+  }
+
+  if (entry.type === 'model_change') {
+    const model = readOptionalString(entry.model);
+    if (!model) {
+      return;
+    }
+    if (model.includes('/')) {
+      scan.prefixedModelByBareId.set(model.slice(model.lastIndexOf('/') + 1), model);
+    }
+    const role = readOptionalString(entry.role);
+    if (!role || MAIN_MODEL_ROLES.has(role)) {
+      scan.lastMainModel = { line: scan.lineNumber, value: model };
+    }
+    return;
+  }
+
+  if (entry.type === 'thinking_level_change') {
+    scan.liveEffort = readOptionalString(entry.level)
+      ?? readOptionalString(entry.thinking)
+      ?? readOptionalString(entry.value)
+      ?? scan.liveEffort;
+    return;
+  }
+
+  if (entry.type !== 'message') {
+    return;
+  }
+  const message = readObjectRecord(entry.message);
+  const model = readOptionalString(message?.model);
+  if (
+    message?.role === 'assistant'
+    && model
+    && readOptionalString(message.stopReason) !== REPLACED_MODEL_STOP_REASON
+  ) {
+    scan.lastAssistantModel = { line: scan.lineNumber, value: model };
+  }
+}
+
+/**
+ * Folds every newline-terminated line in `[start, end)`, returning the offset
+ * one past the last complete line plus any trailing fragment.
+ *
+ * Offsets are counted from raw bytes rather than from decoded line lengths, so
+ * a resume point cannot drift. The fragment — the watcher does observe the file
+ * mid-append — is neither folded nor counted here, so the next pass reads it
+ * again once it is complete.
+ */
+async function foldTranscriptLines(
+  filePath: string,
+  start: number,
+  end: number,
+  fold: (line: string) => void,
+): Promise<{ cursor: number; trailing: string }> {
+  let cursor = start;
+  let carry: Buffer<ArrayBufferLike> = EMPTY_LINE_CARRY;
+  const stream = fs.createReadStream(filePath, { start, end: end - 1 });
+  try {
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
+      const buffer = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+      let from = 0;
+      let newline = buffer.indexOf(0x0a, from);
+      while (newline !== -1) {
+        fold(buffer.toString('utf8', from, newline));
+        cursor += newline - from + 1;
+        from = newline + 1;
+        newline = buffer.indexOf(0x0a, from);
+      }
+      carry = from < buffer.length ? buffer.subarray(from) : EMPTY_LINE_CARRY;
+    }
+  } finally {
+    stream.destroy();
+  }
+  return { cursor, trailing: carry.length > 0 ? carry.toString('utf8') : '' };
+}
+
+/**
  * Session indexer for omp ACP transcripts.
  *
  * omp persists each session as `~/.omp/agent/sessions/<cwd-slug>/<ts>_<id>.jsonl`.
@@ -97,8 +253,24 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
     const files = await findFilesRecursivelyCreatedAfter(this.sessionsRoot, '.jsonl', since ?? null);
 
     let processed = 0;
+    // Owners already synchronized by this scan. A sidecar is not a session; it
+    // stands in for the transcript that owns it, and this scan usually reaches
+    // that transcript directly as well. Resolving without deduplicating would
+    // re-synchronize an owner once per sidecar it owns — the whole per-file
+    // scan, multiplied, on the one path that walks every file under the root.
+    // Skipping sidecars outright would be cheaper still, but an incremental
+    // scan only sees files born since its cursor, so a new sidecar is the one
+    // thing that can bring an older, not-yet-indexed owner back into view.
+    const synchronizedOwners = new Set<string>();
     for (const filePath of files) {
-      if (await this.synchronizeFile(filePath)) {
+      const owner = path.basename(filePath).startsWith('__')
+        ? resolveOmpSidecarParent(filePath)
+        : filePath;
+      if (!owner || synchronizedOwners.has(owner)) {
+        continue;
+      }
+      synchronizedOwners.add(owner);
+      if (await this.synchronizeFile(owner)) {
         processed += 1;
       }
     }
@@ -106,11 +278,20 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
   }
 
   async synchronizeFile(filePath: string): Promise<string | null> {
-    // Skip OMP sub-agent sidecars such as `__advisor.jsonl`. Indexing one
-    // would create a misleading standalone session. The parent history reader
-    // folds its substantive advisor notes into the owning transcript instead.
-    if (!filePath.endsWith('.jsonl') || path.basename(filePath).startsWith('__')) {
+    if (!filePath.endsWith('.jsonl')) {
       return null;
+    }
+
+    if (path.basename(filePath).startsWith('__')) {
+      // A sidecar is never a session of its own, but `readNormalizedOmpHistory`
+      // folds its advisor notes into the owning transcript, so its content is
+      // part of that session's history. Index the owner instead. The watcher
+      // drops any event whose sync reported nothing indexed, so returning null
+      // here left a turn that wrote only advisor output with no
+      // `session_upserted`, and an open chat never learned that the history it
+      // was showing had changed.
+      const parentTranscript = resolveOmpSidecarParent(filePath);
+      return parentTranscript ? this.synchronizeFile(parentTranscript) : null;
     }
 
     const parsed = await this.parseSessionHeader(filePath);
@@ -286,79 +467,80 @@ export class OmpSessionSynchronizer implements IProviderSessionSynchronizer {
    * the same turn.
    */
   private async deriveLiveConfig(filePath: string): Promise<ProviderSessionConfigUpdate[]> {
-    let lineNumber = 0;
-    let lastMainModel: { line: number; value: string } | null = null;
-    let lastAssistantModel: { line: number; value: string } | null = null;
-    let liveEffort: string | null = null;
-    const prefixedModelByBareId = new Map<string, string>();
-
-    const stream = fs.createReadStream(filePath);
-    const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let stats: fs.Stats;
     try {
-      for await (const line of lines) {
-        lineNumber += 1;
-        let entry: Record<string, unknown> | null;
-        try {
-          entry = readObjectRecord(JSON.parse(line));
-        } catch {
-          continue;
-        }
-        if (!entry) {
-          continue;
-        }
-
-        if (entry.type === 'model_change') {
-          const model = readOptionalString(entry.model);
-          if (!model) {
-            continue;
-          }
-          if (model.includes('/')) {
-            prefixedModelByBareId.set(model.slice(model.lastIndexOf('/') + 1), model);
-          }
-          const role = readOptionalString(entry.role);
-          if (!role || MAIN_MODEL_ROLES.has(role)) {
-            lastMainModel = { line: lineNumber, value: model };
-          }
-          continue;
-        }
-
-        if (entry.type === 'thinking_level_change') {
-          liveEffort = readOptionalString(entry.level)
-            ?? readOptionalString(entry.thinking)
-            ?? readOptionalString(entry.value)
-            ?? liveEffort;
-          continue;
-        }
-
-        if (entry.type !== 'message') {
-          continue;
-        }
-        const message = readObjectRecord(entry.message);
-        const model = readOptionalString(message?.model);
-        if (
-          message?.role === 'assistant'
-          && model
-          && readOptionalString(message.stopReason) !== REPLACED_MODEL_STOP_REASON
-        ) {
-          lastAssistantModel = { line: lineNumber, value: model };
-        }
-      }
+      stats = await fs.promises.stat(filePath);
     } catch {
       return [];
-    } finally {
-      lines.close();
-      stream.destroy();
     }
 
-    const latestModel = lastMainModel && lastAssistantModel
-      ? (lastMainModel.line > lastAssistantModel.line ? lastMainModel.value : lastAssistantModel.value)
-      : (lastMainModel?.value ?? lastAssistantModel?.value ?? null);
+    // Carrying state forward requires both that this is still the same file and
+    // that it only grew. A shorter file is a different session on the same path;
+    // so is a same-or-longer one with a different inode, which a length check
+    // alone would happily resume into the middle of.
+    const previous = liveConfigScans.get(filePath);
+    const resumable = previous
+      && previous.device === stats.dev
+      && previous.inode === stats.ino
+      && previous.cursor <= stats.size
+      ? previous
+      : null;
+    // Folded into a copy: a read that throws partway must leave the retained
+    // state exactly as it was rather than half-advanced.
+    const scan: LiveConfigScan = resumable
+      ? { ...resumable, prefixedModelByBareId: new Map(resumable.prefixedModelByBareId) }
+      : {
+        device: stats.dev,
+        inode: stats.ino,
+        cursor: 0,
+        lineNumber: 0,
+        lastMainModel: null,
+        lastAssistantModel: null,
+        liveEffort: null,
+        prefixedModelByBareId: new Map(),
+      };
+
+    let trailing = '';
+    if (scan.cursor < stats.size) {
+      try {
+        const folded = await foldTranscriptLines(
+          filePath,
+          scan.cursor,
+          stats.size,
+          (line) => foldLiveConfigLine(scan, line),
+        );
+        scan.cursor = folded.cursor;
+        trailing = folded.trailing;
+      } catch {
+        return [];
+      }
+    }
+
+    rememberLiveConfigScan(filePath, scan);
+
+    // omp terminates every record with a newline, but a complete final record
+    // left without one is still current state, and the previous full-file
+    // reader reported it. Fold it into a throwaway copy so this answer reflects
+    // it while the retained cursor stays behind it — the next append re-reads
+    // those bytes as part of the finished line, folding it exactly once.
+    const answer = trailing
+      ? { ...scan, prefixedModelByBareId: new Map(scan.prefixedModelByBareId) }
+      : scan;
+    if (trailing) {
+      foldLiveConfigLine(answer, trailing);
+    }
+
+    const latestModel = answer.lastMainModel && answer.lastAssistantModel
+      ? (answer.lastMainModel.line > answer.lastAssistantModel.line
+        ? answer.lastMainModel.value
+        : answer.lastAssistantModel.value)
+      : (answer.lastMainModel?.value ?? answer.lastAssistantModel?.value ?? null);
     const liveModel = latestModel?.includes('/')
       ? latestModel
-      : (latestModel ? prefixedModelByBareId.get(latestModel) ?? null : null);
+      : (latestModel ? answer.prefixedModelByBareId.get(latestModel) ?? null : null);
     return [
       ...(liveModel ? [{ field: 'model' as const, value: liveModel }] : []),
-      ...(liveEffort ? [{ field: 'effort' as const, value: liveEffort }] : []),
+      ...(answer.liveEffort ? [{ field: 'effort' as const, value: answer.liveEffort }] : []),
     ];
   }
 }

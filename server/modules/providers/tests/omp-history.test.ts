@@ -6,7 +6,7 @@
  * then fetchHistory — asserting the DB row and the normalized/paged messages.
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, appendFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, before, after } from 'node:test';
@@ -775,5 +775,221 @@ describe('omp synchronizer + fetchHistory', () => {
     assert.equal(row?.live_effort, null);
     assert.equal(row?.model_dirty, 1);
     assert.equal(row?.effort_dirty, 1);
+  });
+
+  /**
+   * The live-config scan resumes from a byte cursor instead of re-reading the
+   * whole transcript on every watcher tick. An off-by-one in that cursor would
+   * silently corrupt every later model report rather than fail loudly, and the
+   * watcher does observe a transcript mid-append.
+   */
+  it('follows a growing transcript across appends, fragments and truncation', async () => {
+    // Imported here, not statically: the synchronizer captures `os.homedir()`
+    // and the DB module reads `DATABASE_PATH` at load, both set in `before`.
+    const { closeConnection, initializeDatabase, sessionsDb } = await import('@/modules/database/index.js');
+    const { OmpSessionSynchronizer } = await import('@/modules/providers/list/omp/omp-session-synchronizer.provider.js');
+    closeConnection();
+    await initializeDatabase();
+
+    const sessionId = 'live-config-incremental';
+    const historyPath = path.join(
+      tempHome,
+      '.omp',
+      'agent',
+      'sessions',
+      '-work-omp-proj',
+      `2026-07-22T05-00-00-000Z_${sessionId}.jsonl`,
+    );
+    const record = (value: unknown) => `${JSON.stringify(value)}\n`;
+    await writeFile(historyPath, [
+      record({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-22T05:00:00.000Z' }),
+      record({ type: 'model_change', model: 'zai/glm-5.3' }),
+      record({ type: 'thinking_level_change', level: 'high' }),
+    ].join(''));
+
+    const synchronizer = new OmpSessionSynchronizer();
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.live_model, 'zai/glm-5.3');
+
+    await appendFile(historyPath, record({ type: 'model_change', model: 'anthropic/claude-opus-5' }));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'anthropic/claude-opus-5',
+      'a model report appended after the resume point must be picked up',
+    );
+
+    // A bare id resolves through the prefix map learned before the resume
+    // point, so the carried state must survive across ticks.
+    await appendFile(historyPath, record({ type: 'message', message: { role: 'assistant', model: 'glm-5.3' } }));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.live_model, 'zai/glm-5.3');
+
+    await appendFile(historyPath, '{"type":"model_change","model":"openai/gpt');
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'zai/glm-5.3',
+      'a half-written line must not be folded in',
+    );
+
+    await appendFile(historyPath, '-5.6"}\n');
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'openai/gpt-5.6',
+      'the completed line must be folded in on the next tick',
+    );
+
+    // A shorter file is a different session reusing the path.
+    await writeFile(historyPath, [
+      record({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-22T06:00:00.000Z' }),
+      record({ type: 'model_change', model: 'zai/glm-4.7' }),
+    ].join(''));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.live_model, 'zai/glm-4.7');
+
+    // A complete final record without a trailing newline is still current
+    // state; the previous full-file reader parsed it.
+    await appendFile(historyPath, JSON.stringify({ type: 'model_change', model: 'zai/glm-4.8' }));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'zai/glm-4.8',
+      'a complete final record must count even without its newline',
+    );
+
+    // A different file at the same path, longer than the retained cursor. Its
+    // model report sits before that cursor, so resuming instead of restarting
+    // would never see it.
+    const replacement = `${historyPath}.next`;
+    await writeFile(replacement, [
+      record({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-22T07:00:00.000Z' }),
+      record({ type: 'model_change', model: 'anthropic/claude-sonnet-9' }),
+      ...Array.from({ length: 8 }, (_unused, index) => record({
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: `padding beyond the previous cursor ${index}` }] },
+      })),
+    ].join(''));
+    await rename(replacement, historyPath);
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'anthropic/claude-sonnet-9',
+      'a different transcript at the same path must not be resumed into',
+    );
+  });
+
+  /**
+   * Advisor sidecars are not sessions, but `readNormalizedOmpHistory` folds
+   * their notes into the owning transcript, so a turn that writes only advisor
+   * output still changes what an open chat should show. The watcher broadcasts
+   * `session_upserted` only for a file whose sync reported a row.
+   */
+  it('reports the owning session when only an advisor sidecar changes', async () => {
+    // Imported here, not statically: the synchronizer captures `os.homedir()`
+    // and the DB module reads `DATABASE_PATH` at load, both set in `before`.
+    const { closeConnection, initializeDatabase } = await import('@/modules/database/index.js');
+    const { OmpSessionSynchronizer } = await import('@/modules/providers/list/omp/omp-session-synchronizer.provider.js');
+    closeConnection();
+    await initializeDatabase();
+
+    const sessionId = '01a06b63-6293-722b-a0c3-21462bd30b0c';
+    const slugDir = path.join(tempHome, '.omp', 'agent', 'sessions', '-work-omp-proj');
+    const stem = `2026-07-23T05-00-00-000Z_${sessionId}`;
+    const mainPath = path.join(slugDir, `${stem}.jsonl`);
+    await writeFile(
+      mainPath,
+      `${JSON.stringify({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-23T05:00:00.000Z' })}\n`,
+    );
+
+    const synchronizer = new OmpSessionSynchronizer();
+    const ownerRowId = await synchronizer.synchronizeFile(mainPath);
+    assert.ok(ownerRowId);
+
+    await mkdir(path.join(slugDir, stem), { recursive: true });
+    const sidecarPath = path.join(slugDir, stem, '__advisor.muse.jsonl');
+    await writeFile(
+      sidecarPath,
+      `${JSON.stringify({ type: 'message', message: { role: 'assistant', content: [] } })}\n`,
+    );
+
+    assert.equal(
+      await synchronizer.synchronizeFile(sidecarPath),
+      ownerRowId,
+      'a sidecar-only write must announce the session whose history includes it',
+    );
+
+    const unrelated = path.join(slugDir, '__scratch.jsonl');
+    await writeFile(unrelated, '{}\n');
+    assert.equal(
+      await synchronizer.synchronizeFile(unrelated),
+      null,
+      'a non-sidecar underscore file is still not a session',
+    );
+
+    // The header parser accepts whatever id omp wrote, and the history reader
+    // folds sidecars for any transcript stem, so owner resolution must not
+    // depend on the id looking like a UUID.
+    const plainId = 'plainsession07';
+    const plainStem = `2026-07-23T06-00-00-000Z_${plainId}`;
+    const plainMain = path.join(slugDir, `${plainStem}.jsonl`);
+    await writeFile(
+      plainMain,
+      `${JSON.stringify({ type: 'session', id: plainId, cwd: CWD, timestamp: '2026-07-23T06:00:00.000Z' })}\n`,
+    );
+    const plainOwnerRowId = await synchronizer.synchronizeFile(plainMain);
+    assert.ok(plainOwnerRowId);
+
+    await mkdir(path.join(slugDir, plainStem), { recursive: true });
+    const plainSidecar = path.join(slugDir, plainStem, '__advisor.luna.jsonl');
+    await writeFile(
+      plainSidecar,
+      `${JSON.stringify({ type: 'message', message: { role: 'assistant', content: [] } })}\n`,
+    );
+    assert.equal(
+      await synchronizer.synchronizeFile(plainSidecar),
+      plainOwnerRowId,
+      'owner resolution must not require a UUID-shaped native id',
+    );
+  });
+
+  /**
+   * The bulk scan is the one path that walks every transcript under the root,
+   * so it must not also follow each sidecar back to an owner it already
+   * visited — that multiplies the whole per-file scan by the sidecar count.
+   */
+  it('does not re-synchronize an owner once per sidecar during a bulk scan', async () => {
+    // Imported here, not statically: the synchronizer captures `os.homedir()`
+    // and the DB module reads `DATABASE_PATH` at load, both set in `before`.
+    const { closeConnection, initializeDatabase } = await import('@/modules/database/index.js');
+    const { OmpSessionSynchronizer } = await import('@/modules/providers/list/omp/omp-session-synchronizer.provider.js');
+    closeConnection();
+    await initializeDatabase();
+
+    const sessionId = '01a06b64-0000-7000-8000-000000000001';
+    const slugDir = path.join(tempHome, '.omp', 'agent', 'sessions', '-work-omp-bulk');
+    const stem = `2026-07-24T05-00-00-000Z_${sessionId}`;
+    await mkdir(path.join(slugDir, stem), { recursive: true });
+    await writeFile(
+      path.join(slugDir, `${stem}.jsonl`),
+      `${JSON.stringify({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-24T05:00:00.000Z' })}\n`,
+    );
+
+    // Two scans over the same set of transcripts, differing only by sidecars.
+    // Comparing them needs no clock and no assumption about what the other
+    // cases left under the shared root.
+    const synchronizer = new OmpSessionSynchronizer();
+    const withoutSidecars = await synchronizer.synchronize();
+
+    const advisorNote = `${JSON.stringify({ type: 'message', message: { role: 'assistant', content: [] } })}\n`;
+    await writeFile(path.join(slugDir, stem, '__advisor.muse.jsonl'), advisorNote);
+    await writeFile(path.join(slugDir, stem, '__advisor.luna.jsonl'), advisorNote);
+
+    assert.equal(
+      await synchronizer.synchronize(),
+      withoutSidecars,
+      'adding two sidecars to an indexed session must not index anything more',
+    );
   });
 });
