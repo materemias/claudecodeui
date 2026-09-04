@@ -102,10 +102,12 @@ export type ProjectSession = {
   [key: string]: unknown;
 };
 
-/** Pagination metadata returned alongside a project's session page. */
+/** Pagination metadata for a project's session source, including the client cursor for the next API page. */
 type ProjectSessionMeta = {
   total?: number;
   hasMore?: boolean;
+  /** Number of canonical API rows consumed. Hydrated running rows do not advance this cursor. */
+  nextOffset?: number;
   [key: string]: unknown;
 };
 
@@ -131,6 +133,8 @@ export type Project = {
   sessions?: ProjectSession[];
   sessionMeta?: ProjectSessionMeta;
   taskmaster?: ProjectTaskmasterInfo;
+  /** True only until the active project source confirms a project synthesized from a running row. */
+  __hydratedOnly?: boolean;
   [key: string]: unknown;
 };
 
@@ -161,7 +165,7 @@ export type InstallMode = 'git' | 'npm';
 
 // ---------------------------
 
-//----------------- SESSION PROCESSING STATE ------------
+//----------------- SESSION RUNNING STATE ------------
 
 /** What a session that is currently producing a response is doing, as shown by the activity indicator. */
 export type SessionActivity = {
@@ -198,13 +202,60 @@ export type SyncProcessingSessions = (
 /** Reports whether one session is currently producing a response. */
 export type IsSessionProcessing = (sessionId?: string | null) => boolean;
 
-/** One running session as reported by the server, before it is folded into the client-side activity map. */
+/** One CloudCLI processing session reported by the server before it is folded into the client-side activity map. */
 export type SessionActivitySnapshot = {
   sessionId: string;
   statusText?: string | null;
   canInterrupt?: boolean;
   startedAt?: number;
 };
+
+/**
+ * One current or recently completed session parsed from the provider sessions API.
+ *
+ * Processing rows belong to CloudCLI and carry interruption timing. Terminal
+ * rows describe an external CLI process and remain status-only. Recent rows
+ * describe completed Web UI runs that stay discoverable for four hours.
+ */
+export type RunningSession =
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'processing';
+      startedAt: number;
+      lastSeq: number;
+      isOneShot?: boolean;
+    }
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'terminal';
+      lastSeq: 0;
+      isOneShot?: boolean;
+    }
+  | {
+      sessionId: string;
+      provider: LLMProvider;
+      source: 'recent';
+      projectId: string;
+      sessionTitle: string;
+      lastActivity: string | null;
+      completedAt: number;
+      lastSeq: 0;
+      isOneShot?: boolean;
+    };
+
+/** A status-only running session observed in an external terminal. */
+export type TerminalRunningSession = Extract<RunningSession, { source: 'terminal' }>;
+
+/** External terminal sessions keyed by their stable app-facing session id. */
+export type TerminalRunningSessionMap = ReadonlyMap<string, TerminalRunningSession>;
+
+/** A completed Web UI run retained for sidebar discovery. */
+export type RecentWebSession = Extract<RunningSession, { source: 'recent' }>;
+
+/** Recently completed Web UI runs keyed by their canonical app-facing session id. */
+export type RecentWebSessionMap = ReadonlyMap<string, RecentWebSession>;
 
 // ---------------------------
 
@@ -1292,6 +1343,7 @@ export type SidebarProjectListProps = {
   onLoadMoreSessions: (projectId: string) => void;
   loadingMoreProjects: Set<string>;
   activeSessions: ReadonlySet<string>;
+  terminalRunningSessions: TerminalRunningSessionMap;
   attentionSessionIds: ReadonlySet<string>;
   isProjectStarred: (projectId: string) => boolean;
   onRenameDraftChange: (draft: string) => void;

@@ -4,7 +4,14 @@ import { render } from '@testing-library/react';
 import React from 'react';
 import { beforeEach, test, vi } from 'vitest';
 
-import type { ActiveSidebarRename, Project, SidebarProjectListProps } from '@/shared/types';
+import type {
+  ActiveSidebarRename,
+  Project,
+  RecentWebSessionMap,
+  SidebarProjectListProps,
+  TerminalRunningSessionMap,
+} from '@/shared/types';
+import { buildRunningProjects } from '@/modules/sidebar/hooks/useSidebarController';
 
 /**
  * SidebarProjectItem and SidebarSessionItem are memoized because a websocket
@@ -59,6 +66,7 @@ const NOW = new Date('2026-08-21T10:00:00.000Z');
 // membership changes, and attentionSessionIds is passed into Sidebar from above.
 // Rebuilding them per render here would test the harness, not the component.
 const NO_SESSION_IDS: ReadonlySet<string> = new Set<string>();
+const NO_TERMINAL_SESSIONS: TerminalRunningSessionMap = new Map();
 
 const listProps = (activeRename: ActiveSidebarRename | null): SidebarProjectListProps => ({
   projects: [PROJECT_A, PROJECT_B],
@@ -78,6 +86,7 @@ const listProps = (activeRename: ActiveSidebarRename | null): SidebarProjectList
   onLoadMoreSessions: noop,
   loadingMoreProjects: new Set(),
   activeSessions: NO_SESSION_IDS,
+  terminalRunningSessions: NO_TERMINAL_SESSIONS,
   attentionSessionIds: NO_SESSION_IDS,
   isProjectStarred: () => false,
   onRenameDraftChange: noop,
@@ -193,7 +202,11 @@ test('the fork callback reaches the rows that render the fork action', () => {
   assert.equal(recordedProjectRowProps[0].onForkSession, onForkSession);
 });
 
-const sessionsProps = (sessionRenameId: string | null, sessionRenameDraft: string) => ({
+const sessionsProps = (
+  sessionRenameId: string | null,
+  sessionRenameDraft: string,
+  terminalRunningSessions: TerminalRunningSessionMap = NO_TERMINAL_SESSIONS,
+) => ({
   project: PROJECT_A,
   isExpanded: true,
   sessions: getAllSessions(PROJECT_A),
@@ -202,6 +215,7 @@ const sessionsProps = (sessionRenameId: string | null, sessionRenameDraft: strin
   hasMoreSessions: false,
   isLoadingMoreSessions: false,
   activeSessions: NO_SESSION_IDS,
+  terminalRunningSessions,
   attentionSessionIds: NO_SESSION_IDS,
   currentTime: NOW,
   sessionRenameId,
@@ -235,6 +249,25 @@ test('within a project, a keystroke changes props on the renamed session row onl
   );
 });
 
+test('terminal source reaches only the matching provider session row', () => {
+  const terminalSessions: TerminalRunningSessionMap = new Map([
+    ['a1', {
+      sessionId: 'a1',
+      provider: 'claude',
+      source: 'terminal',
+      lastSeq: 0,
+    }],
+  ]);
+
+  render(React.createElement(
+    SidebarProjectSessions,
+    sessionsProps(null, '', terminalSessions),
+  ));
+
+  assert.equal(recordedSessionRowProps[0].isTerminal, true);
+  assert.equal(recordedSessionRowProps[1].isTerminal, false);
+});
+
 test('the sorted session list is the same array until the project itself changes', () => {
   // A fresh array here is on its own enough to defeat every row memo below it.
   assert.equal(getAllSessions(PROJECT_A), getAllSessions(PROJECT_A));
@@ -245,4 +278,90 @@ test('the sorted session list is the same array until the project itself changes
     getAllSessions(PROJECT_A),
     'a replaced project must not read a stale entry',
   );
+});
+
+test('Running hydrates a retained session beyond the loaded page and dedupes a loaded canonical row', () => {
+  const project = makeProject(
+    'paged-project',
+    Array.from({ length: 20 }, (_, index) => `newer-${index}`),
+  );
+  const recentSessions: RecentWebSessionMap = new Map([
+    ['retained-session', {
+      sessionId: 'retained-session',
+      provider: 'codex',
+      source: 'recent',
+      projectId: 'paged-project',
+      sessionTitle: 'Retained title',
+      lastActivity: '2026-08-21T09:00:00.000Z',
+      completedAt: 1_000_000,
+      lastSeq: 0,
+    }],
+  ]);
+  const runningIds = new Set(['retained-session']);
+
+  const hydrated = buildRunningProjects([project], runningIds, recentSessions, 'name');
+  assert.deepEqual(hydrated[0]?.sessions?.map((session) => session.id), ['retained-session']);
+  assert.equal(hydrated[0]?.sessions?.[0]?.summary, 'Retained title');
+
+  const loadedCanonical = {
+    ...project,
+    sessions: [{
+      id: 'retained-session',
+      summary: 'Database title',
+      lastActivity: '2026-08-21T09:30:00.000Z',
+      __provider: 'codex' as const,
+    }],
+  };
+  const deduped = buildRunningProjects([loadedCanonical], runningIds, recentSessions, 'name');
+  assert.equal(deduped[0]?.sessions?.length, 1);
+  assert.equal(deduped[0]?.sessions?.[0]?.summary, 'Database title');
+});
+
+test('Running excludes one-shot canonical and recent rows', () => {
+  const baseProject = makeProject('one-shot-project', ['canonical-visible', 'canonical-hidden']);
+  const project: Project = {
+    ...baseProject,
+    sessions: (baseProject.sessions ?? []).map((session) => (
+      session.id === 'canonical-hidden'
+        ? { ...session, isOneShot: true }
+        : session
+    )),
+  };
+  const recentSessions: RecentWebSessionMap = new Map([
+    ['recent-visible', {
+      sessionId: 'recent-visible',
+      provider: 'claude',
+      source: 'recent',
+      projectId: 'one-shot-project',
+      sessionTitle: 'Recent visible',
+      lastActivity: null,
+      completedAt: 1_000,
+      lastSeq: 0,
+      isOneShot: false,
+    }],
+    ['recent-hidden', {
+      sessionId: 'recent-hidden',
+      provider: 'claude',
+      source: 'recent',
+      projectId: 'one-shot-project',
+      sessionTitle: 'Recent hidden',
+      lastActivity: null,
+      completedAt: 2_000,
+      lastSeq: 0,
+      isOneShot: true,
+    }],
+  ]);
+  const runningIds = new Set([
+    'canonical-visible',
+    'canonical-hidden',
+    'recent-visible',
+    'recent-hidden',
+  ]);
+
+  const runningProjects = buildRunningProjects([project], runningIds, recentSessions, 'name');
+  assert.deepEqual(
+    runningProjects[0]?.sessions?.map((session) => session.id),
+    ['canonical-visible', 'recent-visible'],
+  );
+  assert.equal(runningProjects[0]?.sessions?.[1]?.isOneShot, false);
 });

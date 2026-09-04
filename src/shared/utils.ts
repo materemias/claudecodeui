@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
-import type { Project, ProjectSession } from '@/shared/types';
+import type { LLMProvider, Project, ProjectSession } from '@/shared/types';
 
 //----------------- DEPLOYMENT MODE ------------
 
@@ -10,6 +10,24 @@ import type { Project, ProjectSession } from '@/shared/types';
  * Read it to hide or gate features that only exist in one of the two deployments.
  */
 export const IS_PLATFORM = import.meta.env?.VITE_IS_PLATFORM === 'true';
+
+// ---------------------------
+
+//----------------- PROVIDERS ------------
+
+/** Parses provider ids received from APIs or persisted settings into the frontend provider union. */
+export function parseLLMProvider(value: unknown): LLMProvider | null {
+  switch (value) {
+    case 'claude':
+    case 'cursor':
+    case 'codex':
+    case 'opencode':
+    case 'omp':
+      return value;
+    default:
+      return null;
+  }
+}
 
 // ---------------------------
 

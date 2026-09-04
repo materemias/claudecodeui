@@ -35,12 +35,21 @@ type ChatRun = {
   completedAt: number | null;
 };
 
+type RecentlyCompletedRun = {
+  sessionId: string;
+  provider: LLMProvider;
+  completedAt: number;
+};
+
 /**
  * How long a completed run stays available for replay. Covers the window
  * between a run finishing and the client refreshing history over REST (for
  * example when the browser tab was asleep while the run completed).
  */
 const COMPLETED_RUN_RETENTION_MS = 5 * 60 * 1000;
+
+/** How long a completed Web UI run remains discoverable in the sidebar. */
+const RECENTLY_COMPLETED_RUN_RETENTION_MS = 4 * 60 * 60 * 1000;
 
 /**
  * Upper bound on buffered events per run so a very long tool-heavy run cannot
@@ -58,6 +67,17 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
  * path all consult it instead of asking each provider runtime individually.
  */
 const runs = new Map<string, ChatRun>();
+
+/** Completion metadata retained independently from the short-lived replay buffers. */
+const recentlyCompletedRuns = new Map<string, RecentlyCompletedRun>();
+
+function pruneRecentlyCompletedRuns(now: number): void {
+  for (const [sessionId, run] of recentlyCompletedRuns) {
+    if (now - run.completedAt >= RECENTLY_COMPLETED_RUN_RETENTION_MS) {
+      recentlyCompletedRuns.delete(sessionId);
+    }
+  }
+}
 
 function evictRunLater(appSessionId: string): void {
   const timer = setTimeout(() => {
@@ -103,7 +123,14 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     // the app id, so the "actual" id is by definition the app id as well.
     outbound.actualSessionId = run.appSessionId;
     run.status = 'completed';
-    run.completedAt = Date.now();
+    const completedAt = Date.now();
+    run.completedAt = completedAt;
+    pruneRecentlyCompletedRuns(completedAt);
+    recentlyCompletedRuns.set(run.appSessionId, {
+      sessionId: run.appSessionId,
+      provider: run.provider,
+      completedAt,
+    });
     evictRunLater(run.appSessionId);
   }
 
@@ -182,6 +209,8 @@ export const chatRunRegistry = {
       return null;
     }
 
+    recentlyCompletedRuns.delete(input.appSessionId);
+
     const run: ChatRun = {
       appSessionId: input.appSessionId,
       provider: input.provider,
@@ -231,6 +260,18 @@ export const chatRunRegistry = {
         startedAt: run.startedAt,
         lastSeq: run.lastSeq,
       }));
+  },
+
+  /**
+   * Returns Web UI runs completed within the four-hour discovery window.
+   *
+   * Replay buffers keep their shorter lifetime. Expired metadata is removed
+   * here and when another completion arrives, so routine polling cannot grow
+   * this map or reset still-valid rows.
+   */
+  listRecentlyCompletedRuns(): RecentlyCompletedRun[] {
+    pruneRecentlyCompletedRuns(Date.now());
+    return [...recentlyCompletedRuns.values()];
   },
 
   /**
@@ -306,5 +347,6 @@ export const chatRunRegistry = {
    */
   clearAll(): void {
     runs.clear();
+    recentlyCompletedRuns.clear();
   },
 };
