@@ -139,6 +139,46 @@ test('conversation search streams title matches before transcript results', asyn
   });
 });
 
+test('conversation search excludes one-shot titles while retaining ordinary CLI sessions', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    sessionsDb.createSession(
+      'visible-search-session',
+      'omp',
+      workspacePath,
+      'Release planning visible',
+    );
+    sessionsDb.createSession(
+      'hidden-search-session',
+      'claude',
+      workspacePath,
+      'Release planning hidden',
+      undefined,
+      undefined,
+      null,
+      { isOneShot: true },
+    );
+
+    const response = await fetch(
+      `${baseUrl}/api/providers/search/sessions?q=release%20planning&limit=50`,
+    );
+    const eventStream = await response.text();
+    const titleEventIndex = eventStream.indexOf('event: title-results');
+    const titleDataLine = eventStream
+      .slice(titleEventIndex)
+      .split('\n')
+      .find((line) => line.startsWith('data: '));
+    assert.ok(titleDataLine);
+
+    const payload = JSON.parse(titleDataLine.slice('data: '.length)) as {
+      titleResults: Array<{ sessionId: string }>;
+    };
+    assert.deepEqual(
+      payload.titleResults.map((session) => session.sessionId),
+      ['visible-search-session'],
+    );
+  });
+});
+
 test('reasoning effort is persisted and returned with the active session model', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     sessionsDb.createAppSession('effort-session', 'codex', workspacePath);

@@ -2,12 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '@/shared/api';
-import type { ServerEvent,
+import type {
+  ServerEvent,
   AppTab,
   LLMProvider,
   LoadingProgress,
   Project,
-  ProjectSession,IsSessionProcessing } from '@/shared/types';
+  ProjectSession,
+  IsSessionProcessing,
+  SessionUpsertedEvent,
+} from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
 import { readSelectedProvider } from '@/shared/selectedProvider';
 
@@ -20,28 +24,6 @@ type UseProjectsStateArgs = {
   isSessionProcessing: IsSessionProcessing;
 };
 
-/**
- * Shape of the per-session sidebar delta (`kind: session_upserted`). It carries
- * everything needed to upsert one session row in place — no full project-list
- * snapshot is ever pushed.
- *
- * Produced on the wire by exactly one builder,
- * `server/modules/websocket/services/session-upsert-broadcast.service.ts`,
- * which both the on-disk sessions watcher and the chat run registry go through.
- */
-type SessionUpsertedEvent = ServerEvent & {
-  sessionId: string;
-  providerSessionId?: string | null;
-  provider: LLMProvider;
-  session: ProjectSession;
-  project: {
-    projectId: string;
-    path: string;
-    fullPath: string;
-    displayName: string;
-    isStarred: boolean;
-  } | null;
-};
 
 type FetchProjectsOptions = {
   showLoadingState?: boolean;
@@ -66,6 +48,7 @@ type SessionDetailsApiPayload = {
     summary?: string;
     createdAt?: string | null;
     lastActivity?: string | null;
+    isOneShot?: boolean;
     project?: {
       projectId?: string;
       path?: string;
@@ -152,11 +135,37 @@ const getProjectSessions = (project: Project): ProjectSession[] => {
 
 const countLoadedProjectSessions = (project: Project): number => getProjectSessions(project).length;
 
+const filterOneShotSessions = (project: Project): Project => {
+  const sessions = project.sessions ?? [];
+  const visibleSessions = sessions.filter((session) => session.isOneShot !== true);
+  if (visibleSessions.length === sessions.length) {
+    return project;
+  }
+
+  const hiddenLoadedCount = sessions.length - visibleSessions.length;
+  const visibleTotal = Math.max(
+    visibleSessions.length,
+    Number(project.sessionMeta?.total ?? sessions.length) - hiddenLoadedCount,
+  );
+  return {
+    ...project,
+    sessions: visibleSessions,
+    sessionMeta: {
+      ...project.sessionMeta,
+      total: visibleTotal,
+      hasMore: visibleSessions.length < visibleTotal,
+    },
+  };
+};
+
 const mergeSessionProviderLists = (baseSessions: ProjectSession[], additionalSessions: ProjectSession[]): ProjectSession[] => {
-  const merged = [...baseSessions];
-  const seenSessionIds = new Set(baseSessions.map((session) => String(session.id)));
+  const merged = baseSessions.filter((session) => session.isOneShot !== true);
+  const seenSessionIds = new Set(merged.map((session) => String(session.id)));
 
   for (const session of additionalSessions) {
+    if (session.isOneShot === true) {
+      continue;
+    }
     const sessionId = String(session.id);
     if (seenSessionIds.has(sessionId)) {
       continue;
@@ -260,6 +269,24 @@ const upsertSessionIntoProject = (project: Project, event: SessionUpsertedEvent)
     __provider: event.provider,
   };
   const existingIndex = sessions.findIndex((session) => aliasIds.has(String(session.id)));
+  if (event.session.isOneShot === true) {
+    const nextSessions = sessions.filter((session) => !aliasIds.has(String(session.id)));
+    const removedCount = sessions.length - nextSessions.length;
+    if (removedCount === 0) {
+      return project;
+    }
+
+    const total = Math.max(0, Number(project.sessionMeta?.total ?? sessions.length) - removedCount);
+    return {
+      ...project,
+      sessions: nextSessions,
+      sessionMeta: {
+        ...project.sessionMeta,
+        total,
+        hasMore: nextSessions.length < total,
+      },
+    };
+  }
 
   let nextSessions: ProjectSession[];
   let inserted = false;
@@ -504,7 +531,7 @@ export function useProjectsState({
         setIsLoadingProjects(true);
       }
       const response = await api.projects();
-      const projectData = (await response.json()) as Project[];
+      const projectData = ((await response.json()) as Project[]).map(filterOneShotSessions);
 
       if (projectsRequestIdRef.current !== requestId) {
         return;
@@ -589,15 +616,23 @@ export function useProjectsState({
       __projectId: project.projectId,
     };
     // A purely local record that reuses the wire shape to feed
-    // `upsertSessionIntoProject`; it is never dispatched onto the socket. It
-    // deliberately carries no `providerSessionId` — the row was created moments
-    // ago by `POST /api/providers/sessions` and the provider has not reported
-    // an id yet, so there is nothing truthful to put there.
+    // `upsertSessionIntoProject`; it is never dispatched onto the socket.
     const upsert: SessionUpsertedEvent = {
       kind: 'session_upserted',
       sessionId: newSessionId,
+      providerSessionId: null,
       provider,
-      session: optimisticSession,
+      session: {
+        ...optimisticSession,
+        selection: {
+          model: null,
+          effort: null,
+          liveModel: null,
+          liveEffort: null,
+          modelDirty: false,
+          effortDirty: false,
+        },
+      },
       project: {
         projectId: project.projectId,
         path: project.path || project.fullPath,
@@ -831,10 +866,6 @@ export function useProjectsState({
         typeof upsert.providerSessionId === 'string' && upsert.providerSessionId !== upsert.sessionId
           ? upsert.providerSessionId
           : null;
-      if (!aliasedSelectedSessionId) {
-        return;
-      }
-
       const normalizedSelectedSession: ProjectSession = {
         ...upsert.session,
         id: upsert.sessionId,
@@ -843,17 +874,16 @@ export function useProjectsState({
       };
 
       setSelectedSession((previousSession) => {
-        if (previousSession?.id !== aliasedSelectedSessionId) {
+        if (
+          previousSession?.id !== upsert.sessionId
+          && previousSession?.id !== aliasedSelectedSessionId
+        ) {
           return previousSession;
         }
-
-        return {
-          ...previousSession,
-          ...normalizedSelectedSession,
-        };
+        return { ...previousSession, ...normalizedSelectedSession };
       });
 
-      if (sessionId === aliasedSelectedSessionId) {
+      if (aliasedSelectedSessionId && sessionId === aliasedSelectedSessionId) {
         navigate(`/session/${upsert.sessionId}`);
       }
     };
@@ -993,6 +1023,7 @@ export function useProjectsState({
           typeof details.provider === 'string' && details.provider.trim()
             ? (details.provider as LLMProvider)
             : readSelectedProvider(),
+        isOneShot: details.isOneShot === true,
         __projectId: resolvedProjectId,
       };
 

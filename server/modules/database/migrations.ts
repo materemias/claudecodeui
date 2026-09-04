@@ -458,6 +458,37 @@ const addSessionEffortColumn = (db: Database): void => {
 };
 
 /**
+ * Adds provider-reported model/effort state and sticky pending-choice flags.
+ *
+ * Existing rows remain clean with no live report. Their recorded model and
+ * effort continue to hydrate as before until the provider reports newer state.
+ */
+const addSessionLiveConfigColumns = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'live_model', 'TEXT');
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'live_effort', 'TEXT');
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'model_dirty', 'BOOLEAN DEFAULT 0');
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'effort_dirty', 'BOOLEAN DEFAULT 0');
+};
+
+/**
+ * Adds one-shot classification and schedules one full provider scan so
+ * pre-existing print and background transcripts receive the new signal.
+ */
+const addSessionOneShotColumn = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  if (columnNames.includes('is_one_shot')) {
+    return;
+  }
+
+  db.transaction(() => {
+    addColumnToTableIfNotExists(db, 'sessions', columnNames, 'is_one_shot', 'BOOLEAN DEFAULT 0');
+    db.exec(LAST_SCANNED_AT_SQL);
+    db.exec('UPDATE scan_state SET last_scanned_at = NULL');
+  })();
+};
+
+/**
  * Adds the last provider title used as the retitle watermark.
  */
 const addSessionProviderNameColumn = (db: Database): void => {
@@ -568,9 +599,11 @@ export const runMigrations = (db: Database) => {
     addProviderSessionIdMapping(db);
     addSessionModelColumn(db);
     addSessionEffortColumn(db);
+    addSessionLiveConfigColumns(db);
     addSessionProviderNameColumn(db);
     addSessionNameSourceColumn(db);
     addForkedFromSessionIdColumn(db);
+    addSessionOneShotColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
 

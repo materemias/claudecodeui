@@ -22,6 +22,12 @@ const TEST_CONTEXT: ProviderRuntimeContext = {
   normalizeMessage: (raw, sid) => ompSessions.normalizeMessage(raw, sid),
   resolveProviderSessionId: (sid) => sid ?? null,
   resolveResumeModel: async () => undefined,
+  readPendingSessionSelection: () => ({
+    sessionExists: false,
+    model: { pending: false, value: null },
+    effort: { pending: false, value: null },
+  }),
+  recordSessionConfigReport: async () => undefined,
   getProviderModels: async () => ({ OPTIONS: [], DEFAULT: '' }),
   isProviderInstalled: async () => true,
 };
@@ -58,10 +64,13 @@ const waitForPending = async (queue: unknown[], what: string) => {
   assert.ok(queue.length > 0, `timed out waiting for a pending ${what}`);
 };
 
-function makeFakeConnection() {
+function makeFakeConnection(
+  initialConfig: Array<{ id: string; currentValue: string }> = [],
+) {
   let sessionCounter = 0;
   const releasePrompt: Array<{ resolve: (value: AnyRecord) => void; reject: (error: Error) => void }> = [];
   const releaseLoad: Array<() => void> = [];
+  const setConfigCalls: AnyRecord[] = [];
 
   let updateHandlerFn: ((params: AnyRecord) => void) | null = null;
   const requestHandlers = new Map();
@@ -69,14 +78,18 @@ function makeFakeConnection() {
   const connection = {
     initializeResult: { agentCapabilities: { loadSession: true } },
     client: {
-      request(method: string) {
+      request(method: string, params?: AnyRecord) {
         if (method === 'session/new') {
           sessionCounter += 1;
-          return Promise.resolve({ sessionId: `S${sessionCounter}` });
+          return Promise.resolve({ sessionId: `S${sessionCounter}`, configOptions: initialConfig });
         }
         if (method === 'session/load') {
           // Held so tests can abort DURING the setup window (before load resolves).
-          return new Promise((resolve) => releaseLoad.push(() => resolve({})));
+          return new Promise((resolve) => releaseLoad.push(() => resolve({ configOptions: initialConfig })));
+        }
+        if (method === 'session/set_config_option') {
+          setConfigCalls.push(params ?? {});
+          return Promise.resolve({});
         }
         if (method === 'session/prompt') {
           return new Promise((resolve, reject) => releasePrompt.push({ resolve, reject }));
@@ -102,6 +115,7 @@ function makeFakeConnection() {
   return {
     connection,
     pendingLoads: () => releaseLoad.length,
+    setConfigCalls,
     fireUpdate: (params: AnyRecord) => updateHandlerFn?.(params),
     firePermission: (params: AnyRecord) => requestHandlers.get('session/request_permission')?.(params),
     fireRequest: (method: string, params: AnyRecord) => requestHandlers.get(method)!(params),
@@ -164,10 +178,94 @@ test('session/update routes to the owning run only — no cross-talk', async () 
 
     // Let both turns finish so the module state is clean.
     await fake.releaseAllPrompts();
+
     await Promise.allSettled([runA, runB]);
 
     assert.equal(writerA.sent.filter((m) => m.kind === 'complete').length, 1);
     assert.equal(writerB.sent.filter((m) => m.kind === 'complete').length, 1);
+  } finally {
+    __setConnectionFactoryForTest(null);
+  }
+});
+test('OMP pushes only sticky choices and serializes live model and effort reports', async () => {
+  const fake = makeFakeConnection([
+    { id: 'model', currentValue: 'zai/glm-5.3' },
+    { id: 'thinking', currentValue: 'low' },
+    { id: 'mode', currentValue: 'default' },
+  ]);
+  const reports: Array<{ source: string; values: string[] }> = [];
+  const context: ProviderRuntimeContext = {
+    ...TEST_CONTEXT,
+    resolveProviderSessionId: () => null,
+    readPendingSessionSelection: () => ({
+      sessionExists: true,
+      model: { pending: true, value: 'anthropic/claude-opus-5' },
+      effort: { pending: true, value: 'high' },
+    }),
+    async recordSessionConfigReport(_appSessionId, _providerSessionId, report) {
+      reports.push({
+        source: report.source,
+        values: report.updates.map((update) => `${update.field}:${update.value}`),
+      });
+    },
+  };
+  __setConnectionFactoryForTest(() => fake.connection);
+  try {
+    const writer = makeWriter();
+    const run = spawnOmp(
+      'hi',
+      {
+        cwd: '/sticky-config',
+        projectPath: '/sticky-config',
+        sessionId: 'APP-STICKY',
+        model: 'anthropic/claude-opus-5',
+        effort: 'high',
+      },
+      writer,
+      context,
+    );
+    await flush();
+
+    assert.deepEqual(
+      fake.setConfigCalls.map((call) => ({ configId: call.configId, value: call.value })),
+      [
+        { configId: 'model', value: 'anthropic/claude-opus-5' },
+        { configId: 'thinking', value: 'high' },
+      ],
+    );
+
+    fake.fireUpdate({
+      sessionId: 'S1',
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions: [
+          { id: 'mode', currentValue: 'default' },
+          { id: 'model', currentValue: 'anthropic/claude-opus-5' },
+          { id: 'thinking', currentValue: 'high' },
+        ],
+      },
+    });
+    await flush();
+
+    assert.deepEqual(reports, [
+      {
+        source: 'snapshot',
+        values: ['model:zai/glm-5.3', 'effort:low'],
+      },
+      {
+        source: 'live',
+        values: ['model:anthropic/claude-opus-5', 'effort:high'],
+      },
+    ]);
+    assert.deepEqual(
+      writer.sent
+        .filter((message) => message.text === 'config_option_update')
+        .map((message) => `${message.configId}:${message.status}`),
+      ['model:anthropic/claude-opus-5', 'thinking:high'],
+    );
+
+    await fake.releaseAllPrompts();
+    await run;
   } finally {
     __setConnectionFactoryForTest(null);
   }

@@ -65,6 +65,17 @@ function createService(providers: IProvider[]) {
         DEFAULT: 'default-model',
       };
     },
+    readPendingSessionSelection() {
+      return {
+        sessionExists: false,
+        model: { pending: false, value: null },
+        effort: { pending: false, value: null },
+      };
+    },
+    recordProviderSessionConfig() {
+      return null;
+    },
+    async broadcastSessionUpserted() {},
   });
 }
 
