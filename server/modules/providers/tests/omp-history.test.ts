@@ -6,7 +6,7 @@
  * then fetchHistory — asserting the DB row and the normalized/paged messages.
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, appendFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, before, after } from 'node:test';
@@ -775,6 +775,109 @@ describe('omp synchronizer + fetchHistory', () => {
     assert.equal(row?.live_effort, null);
     assert.equal(row?.model_dirty, 1);
     assert.equal(row?.effort_dirty, 1);
+  });
+
+  /**
+   * The live-config scan resumes from a byte cursor instead of re-reading the
+   * whole transcript on every watcher tick. An off-by-one in that cursor would
+   * silently corrupt every later model report rather than fail loudly, and the
+   * watcher does observe a transcript mid-append.
+   */
+  it('follows a growing transcript across appends, fragments and truncation', async () => {
+    // Imported here, not statically: the synchronizer captures `os.homedir()`
+    // and the DB module reads `DATABASE_PATH` at load, both set in `before`.
+    const { closeConnection, initializeDatabase, sessionsDb } = await import('@/modules/database/index.js');
+    const { OmpSessionSynchronizer } = await import('@/modules/providers/list/omp/omp-session-synchronizer.provider.js');
+    closeConnection();
+    await initializeDatabase();
+
+    const sessionId = 'live-config-incremental';
+    const historyPath = path.join(
+      tempHome,
+      '.omp',
+      'agent',
+      'sessions',
+      '-work-omp-proj',
+      `2026-07-22T05-00-00-000Z_${sessionId}.jsonl`,
+    );
+    const record = (value: unknown) => `${JSON.stringify(value)}\n`;
+    await writeFile(historyPath, [
+      record({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-22T05:00:00.000Z' }),
+      record({ type: 'model_change', model: 'zai/glm-5.3' }),
+      record({ type: 'thinking_level_change', level: 'high' }),
+    ].join(''));
+
+    const synchronizer = new OmpSessionSynchronizer();
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.live_model, 'zai/glm-5.3');
+
+    await appendFile(historyPath, record({ type: 'model_change', model: 'anthropic/claude-opus-5' }));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'anthropic/claude-opus-5',
+      'a model report appended after the resume point must be picked up',
+    );
+
+    // A bare id resolves through the prefix map learned before the resume
+    // point, so the carried state must survive across ticks.
+    await appendFile(historyPath, record({ type: 'message', message: { role: 'assistant', model: 'glm-5.3' } }));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.live_model, 'zai/glm-5.3');
+
+    await appendFile(historyPath, '{"type":"model_change","model":"openai/gpt');
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'zai/glm-5.3',
+      'a half-written line must not be folded in',
+    );
+
+    await appendFile(historyPath, '-5.6"}\n');
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'openai/gpt-5.6',
+      'the completed line must be folded in on the next tick',
+    );
+
+    // A shorter file is a different session reusing the path.
+    await writeFile(historyPath, [
+      record({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-22T06:00:00.000Z' }),
+      record({ type: 'model_change', model: 'zai/glm-4.7' }),
+    ].join(''));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.live_model, 'zai/glm-4.7');
+
+    // A complete final record without a trailing newline is still current
+    // state; the previous full-file reader parsed it.
+    await appendFile(historyPath, JSON.stringify({ type: 'model_change', model: 'zai/glm-4.8' }));
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'zai/glm-4.8',
+      'a complete final record must count even without its newline',
+    );
+
+    // A different file at the same path, longer than the retained cursor. Its
+    // model report sits before that cursor, so resuming instead of restarting
+    // would never see it.
+    const replacement = `${historyPath}.next`;
+    await writeFile(replacement, [
+      record({ type: 'session', id: sessionId, cwd: CWD, timestamp: '2026-07-22T07:00:00.000Z' }),
+      record({ type: 'model_change', model: 'anthropic/claude-sonnet-9' }),
+      ...Array.from({ length: 8 }, (_unused, index) => record({
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: `padding beyond the previous cursor ${index}` }] },
+      })),
+    ].join(''));
+    await rename(replacement, historyPath);
+    await synchronizer.synchronizeFile(historyPath);
+    assert.equal(
+      sessionsDb.getSessionById(sessionId)?.live_model,
+      'anthropic/claude-sonnet-9',
+      'a different transcript at the same path must not be resumed into',
+    );
   });
 
   /**
