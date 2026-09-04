@@ -182,7 +182,8 @@
       "loadAll": "Load all messages",
       "loadingAll": "Loading all messages...",
       "allLoaded": "All messages loaded",
-      "perfWarning": "All messages loaded — scrolling may be slower. Click \"Scroll to bottom\" to restore performance."
+      "perfWarning": "All messages loaded — scrolling may be slower. Click \"Scroll to bottom\" to restore performance.",
+      "turnInterrupted": "The connection to the agent dropped before this turn finished. Send again to continue."
     }
   },
   "shell": {

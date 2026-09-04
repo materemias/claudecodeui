@@ -1,6 +1,7 @@
 import type { ChatMessage, DiffLine, LLMProvider } from '@/shared/types';
 import { getToolConfig } from '@/modules/chat/tools';
 import { parseToolPayload, summarizeDiff } from '@/modules/chat/utils/messageTransforms';
+import { i18n } from '@/modules/i18n';
 
 type BuildTranscriptMarkdownInput = {
   messages: ChatMessage[];
@@ -118,6 +119,11 @@ export function buildTranscriptMarkdown(input: BuildTranscriptMarkdownInput): st
       if (message.files?.length) {
         sections.push('', `_Attached: ${message.files.map((file) => file.name).join(', ')}_`);
       }
+      continue;
+    }
+
+    if (message.isTurnInterrupted) {
+      sections.push(`_${i18n.t('session.messages.turnInterrupted', { ns: 'chat' })}_`);
       continue;
     }
 

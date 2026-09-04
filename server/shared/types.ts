@@ -171,9 +171,10 @@ export type ProviderSessionModel = {
 };
 
 /**
- * Message/event variants emitted by provider adapters and normalized transports.
+ * Message/event variants carried by normalized transcripts and transports.
  *
- * Keep this union in sync with event kinds produced by provider session adapters.
+ * Keep this union in sync with provider events and client-synthesized
+ * transcript rows.
  */
 export type MessageKind =
   | 'text'
@@ -190,6 +191,7 @@ export type MessageKind =
   | 'permission_cancelled'
   | 'session_created'
   | 'history_truncated'
+  | 'turn_interrupted'
   | 'task_notification';
 
 /**

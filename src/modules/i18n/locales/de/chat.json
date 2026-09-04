@@ -147,7 +147,8 @@
       "loadAll": "Alle Nachrichten laden",
       "loadingAll": "Alle Nachrichten werden geladen...",
       "allLoaded": "Alle Nachrichten geladen",
-      "perfWarning": "Alle Nachrichten geladen – Scrollen kann langsamer sein. Klick auf 'Nach unten scrollen', um die Leistung wiederherzustellen."
+      "perfWarning": "Alle Nachrichten geladen – Scrollen kann langsamer sein. Klick auf 'Nach unten scrollen', um die Leistung wiederherzustellen.",
+      "turnInterrupted": "Die Verbindung zum Agenten wurde unterbrochen, bevor diese Antwort fertig war. Sende erneut, um fortzufahren."
     }
   },
   "shell": {
