@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from 'react';
-import { Check, ChevronDown, ChevronRight, Edit3, Star, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Edit3, Plus, Star, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '@/shared/ui';
@@ -250,6 +250,18 @@ function SidebarProjectItem({
                   </>
                 ) : (
                   <>
+                    <button
+                      type="button"
+                      className="flex h-8 w-8 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 active:scale-90 dark:border-primary/30 dark:bg-primary/20"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onNewSession(project);
+                      }}
+                      aria-label={t('sessions.newSession')}
+                      title={t('sessions.newSession')}
+                    >
+                      <Plus className="h-4 w-4 text-primary" />
+                    </button>
                     <button
                       className="flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 bg-red-500/10 active:scale-90 dark:border-red-800 dark:bg-red-900/30"
                       onClick={(event) => {
