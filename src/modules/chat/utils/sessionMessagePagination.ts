@@ -46,6 +46,14 @@ function serializedValue(value: unknown): string {
  * generate fresh IDs on every read. The fallback uses stable transcript fields
  * and deliberately excludes enrichment such as toolResult, which may change
  * when the provider finishes writing a turn.
+ *
+ * The compared set must cover every kind's own payload. It did not: a status
+ * note (`task_notification`) carries its identity in `status`/`summary` and
+ * nothing else, so a run of distinct notes sharing one timestamp all compared
+ * equal, and a page boundary landing inside that run reported a false overlap
+ * that stalled the pager. Two rows with nothing to compare are also treated as
+ * distinct now — an empty comparison is absence of evidence, not proof of
+ * identity.
  */
 export function messagesRepresentSamePersistedRow(
   first: NormalizedMessage,
@@ -65,13 +73,26 @@ export function messagesRepresentSamePersistedRow(
   if (first.rowid !== undefined || second.rowid !== undefined) return first.rowid === second.rowid;
   if (first.sequence !== undefined || second.sequence !== undefined) return first.sequence === second.sequence;
 
-  return (
-    (first.content ?? '') === (second.content ?? '')
-    && (first.text ?? '') === (second.text ?? '')
-    && (first.toolName ?? '') === (second.toolName ?? '')
-    && (first.commandName ?? '') === (second.commandName ?? '')
-    && (first.parentToolUseId ?? '') === (second.parentToolUseId ?? '')
-    && serializedValue(first.toolInput) === serializedValue(second.toolInput)
+  if ((first.content ?? '') !== (second.content ?? '')) return false;
+  if ((first.text ?? '') !== (second.text ?? '')) return false;
+  if ((first.toolName ?? '') !== (second.toolName ?? '')) return false;
+  if ((first.commandName ?? '') !== (second.commandName ?? '')) return false;
+  if ((first.parentToolUseId ?? '') !== (second.parentToolUseId ?? '')) return false;
+  if ((first.status ?? '') !== (second.status ?? '')) return false;
+  if ((first.summary ?? '') !== (second.summary ?? '')) return false;
+  if (serializedValue(first.toolInput) !== serializedValue(second.toolInput)) return false;
+
+  // Every compared field was empty on both sides: nothing distinguishes these
+  // rows and nothing identifies them either, so they are not the same row.
+  return Boolean(
+    first.content
+    || first.text
+    || first.toolName
+    || first.commandName
+    || first.parentToolUseId
+    || first.status
+    || first.summary
+    || first.toolInput !== undefined,
   );
 }
 
