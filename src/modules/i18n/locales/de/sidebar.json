@@ -42,7 +42,9 @@
     "renameProject": "Projekt umbenennen (F2)",
     "deleteProject": "Projekt aus Seitenleiste entfernen (Entf)",
     "addToFavorites": "Zu Favoriten hinzufügen",
+    "addSessionToFavorites": "Sitzung zu Favoriten hinzufügen",
     "removeFromFavorites": "Aus Favoriten entfernen",
+    "removeSessionFromFavorites": "Sitzung aus Favoriten entfernen",
     "editSessionName": "Sitzungsname manuell bearbeiten",
     "deleteSession": "Diese Sitzung dauerhaft löschen",
     "activeSessionIndicator": "Kürzlich aktive Sitzung (letzte 10 Minuten)",
@@ -114,7 +116,8 @@
     "restoreProjectError": "Fehler beim Wiederherstellen des Projekts. Bitte erneut versuchen.",
     "restoreSessionFailed": "Sitzung konnte nicht wiederhergestellt werden. Bitte erneut versuchen.",
     "restoreSessionError": "Fehler beim Wiederherstellen der Sitzung. Bitte erneut versuchen.",
-    "forkSessionError": "Diese Sitzung konnte nicht verzweigt werden. Bitte erneut versuchen."
+    "forkSessionError": "Diese Sitzung konnte nicht verzweigt werden. Bitte erneut versuchen.",
+    "noStarredSessions": "Keine favorisierten Sitzungen"
   },
   "version": {
     "updateAvailable": "Update verfügbar",
@@ -123,6 +126,7 @@
   "search": {
     "modeProjects": "Projekte",
     "modeConversations": "Unterhaltungen",
+    "starredOnlyTooltip": "Nur favorisierte Sitzungen",
     "conversationsPlaceholder": "In Unterhaltungen suchen...",
     "searching": "Sucht...",
     "sessionTitles": "Sitzungstitel",

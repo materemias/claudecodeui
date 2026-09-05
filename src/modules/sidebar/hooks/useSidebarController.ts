@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, RecentWebSessionMap, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, TerminalRunningSessionMap } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, RecentWebSessionMap, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, StarredSessionListItem, TerminalRunningSessionMap } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -14,6 +14,8 @@ import {
   clearLegacyStarredProjectIds,
   readLegacyStarredProjectIds,
   readProjectSortOrder,
+  readStarredSessionsOnly,
+  writeStarredSessionsOnly,
 } from '@/modules/sidebar/utils/sidebarStoredPreferences';
 
 
@@ -37,6 +39,13 @@ type RecentConversationsApiPayload = {
     conversations?: RecentConversationListItem[];
     total?: number;
     hasMore?: boolean;
+  };
+};
+
+type StarredSessionsApiPayload = {
+  success?: boolean;
+  data?: {
+    sessions?: StarredSessionListItem[];
   };
 };
 
@@ -131,6 +140,85 @@ export function buildRunningProjects(
   return sortProjects(projectsWithRunningSessions, projectSortOrder);
 }
 
+/**
+ * Used by the sidebar controller and its filter test to build the Projects view
+ * while the starred-sessions filter is on.
+ *
+ * The starred sessions are grafted onto their project rather than filtered out
+ * of `project.sessions`, because a starred session often sits past the page of
+ * sessions the project has loaded and a plain filter would simply lose it.
+ */
+export function buildStarredProjects(
+  projects: Project[],
+  starredSessions: StarredSessionListItem[],
+  projectSortOrder: ProjectSortOrder,
+): Project[] {
+  if (starredSessions.length === 0) {
+    return [];
+  }
+
+  const starredSessionsByProject = new Map<string, ProjectSession[]>();
+  for (const session of starredSessions) {
+    if (
+      !session.projectId
+      || session.isArchived
+      || session.isProjectArchived
+      || session.isOneShot
+    ) {
+      continue;
+    }
+
+    const projectSessions = starredSessionsByProject.get(session.projectId) ?? [];
+    projectSessions.push({
+      id: session.sessionId,
+      summary: session.sessionTitle,
+      lastActivity: session.lastActivity ?? undefined,
+      createdAt: session.createdAt ?? undefined,
+      provider: session.provider,
+      __provider: session.provider,
+      __projectId: session.projectId,
+      isOneShot: false,
+    });
+    starredSessionsByProject.set(session.projectId, projectSessions);
+  }
+
+  const projectsWithStarredSessions = projects.reduce<Project[]>((acc, project) => {
+    const starredForProject = starredSessionsByProject.get(project.projectId);
+    if (!starredForProject) {
+      return acc;
+    }
+
+    const starredIds = new Set(starredForProject.map((session) => session.id));
+    // Loaded sessions win over the grafted ones: they carry the richer metadata
+    // (message counts, provider selection) the rows render.
+    const sessions = (project.sessions ?? []).filter((session) => starredIds.has(String(session.id)));
+    const loadedIds = new Set(sessions.map((session) => String(session.id)));
+
+    for (const session of starredForProject) {
+      if (!loadedIds.has(session.id)) {
+        sessions.push(session);
+      }
+    }
+
+    if (sessions.length === 0) {
+      return acc;
+    }
+
+    acc.push({
+      ...project,
+      sessions,
+      sessionMeta: {
+        ...project.sessionMeta,
+        total: sessions.length,
+        hasMore: false,
+      },
+    });
+    return acc;
+  }, []);
+
+  return sortProjects(projectsWithStarredSessions, projectSortOrder);
+}
+
 export function useSidebarController({
   projects,
   selectedProject,
@@ -188,10 +276,36 @@ export function useSidebarController({
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [optimisticStarByProjectId, setOptimisticStarByProjectId] = useState<Map<string, boolean>>(new Map());
   const [loadingMoreProjects, setLoadingMoreProjects] = useState<Set<string>>(new Set());
+  // Every starred session, fetched apart from the project pages because a star
+  // can point at a session no loaded page contains.
+  const [starredSessions, setStarredSessions] = useState<StarredSessionListItem[]>([]);
+  // This fetch gates the starred-only filter so an unavailable list is not
+  // mistaken for a successful empty result.
+  const [isStarredSessionsLoading, setIsStarredSessionsLoading] = useState(true);
+  // The error stays separate from the list so a failed refresh can retain old
+  // stars without hiding the failure.
+  const [starredSessionsError, setStarredSessionsError] = useState(false);
+  // Distinguishes a first-load failure from a later refresh failure.
+  const [starredSessionsLoaded, setStarredSessionsLoaded] = useState(false);
+  // The starred-only view filter, restored from the device it was set on.
+  const [isStarredSessionsOnly, setIsStarredSessionsOnly] = useState<boolean>(readStarredSessionsOnly);
+  // In-flight session star toggles, so a row reflects the click before the
+  // server answers. Mirrors optimisticStarByProjectId.
+  const [optimisticStarBySessionId, setOptimisticStarBySessionId] = useState<Map<string, boolean>>(new Map());
   const searchSeqRef = useRef(0);
   const recentConversationsSeqRef = useRef(0);
   const eventSourceRef = useRef<EventSource | null>(null);
   const starToggleSequenceByProjectRef = useRef<Map<string, number>>(new Map());
+  const sessionStarToggleSequenceRef = useRef<Map<string, number>>(new Map());
+  // Per-session serialization prevents rapid clicks from reaching the toggle
+  // endpoint out of order.
+  const sessionStarRequestQueueRef = useRef<Map<string, Promise<void>>>(new Map());
+  // Updated synchronously on click so a second click sees the first click's
+  // desired state before React renders the optimistic map.
+  const sessionStarStateRef = useRef<Map<string, boolean>>(new Map());
+  // Only the newest starred-list request may replace the filter's source of
+  // truth; mount, refresh, and toggle requests can overlap.
+  const starredSessionsFetchSequenceRef = useRef(0);
   const migrationStartedRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
 
@@ -325,6 +439,45 @@ export function useSidebarController({
     }
   }, []);
 
+  const fetchStarredSessions = useCallback(async (): Promise<StarredSessionListItem[] | null> => {
+    const requestSequence = ++starredSessionsFetchSequenceRef.current;
+    setIsStarredSessionsLoading(true);
+    setStarredSessionsError(false);
+    try {
+      const response = await api.starredSessions();
+      if (!response.ok) {
+        throw new Error(`Failed to load starred sessions: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as StarredSessionsApiPayload;
+      if (!Array.isArray(payload.data?.sessions)) {
+        throw new Error('Starred sessions response did not contain a session list');
+      }
+
+      if (starredSessionsFetchSequenceRef.current !== requestSequence) {
+        return null;
+      }
+
+      setStarredSessions(payload.data.sessions);
+      setStarredSessionsLoaded(true);
+      return payload.data.sessions;
+    } catch (error) {
+      if (starredSessionsFetchSequenceRef.current !== requestSequence) {
+        return null;
+      }
+
+      // The previous list stays in place: a failed refetch must not empty the
+      // filter out from under the user.
+      setStarredSessionsError(true);
+      console.error('[Sidebar] Failed to load starred sessions:', error);
+      return null;
+    } finally {
+      if (starredSessionsFetchSequenceRef.current === requestSequence) {
+        setIsStarredSessionsLoading(false);
+      }
+    }
+  }, []);
+
   const fetchRecentConversationsPage = useCallback(async (offset: number, append: boolean) => {
     const requestSequence = ++recentConversationsSeqRef.current;
     if (append) {
@@ -381,13 +534,16 @@ export function useSidebarController({
   }, [fetchRecentConversationsPage]);
 
   const loadMoreRecentConversations = useCallback(() => {
-    if (isLoadingMoreRecentConversations || !recentConversationsHasMore) {
+    // Under the starred filter the list is the starred sessions themselves, so
+    // there are no further pages to fetch.
+    if (isStarredSessionsOnly || isLoadingMoreRecentConversations || !recentConversationsHasMore) {
       return;
     }
     void fetchRecentConversationsPage(recentConversations.length, true);
   }, [
     fetchRecentConversationsPage,
     isLoadingMoreRecentConversations,
+    isStarredSessionsOnly,
     recentConversations.length,
     recentConversationsHasMore,
   ]);
@@ -421,6 +577,10 @@ export function useSidebarController({
   useEffect(() => {
     void fetchArchivedSessions();
   }, [fetchArchivedSessions]);
+
+  useEffect(() => {
+    void fetchStarredSessions();
+  }, [fetchStarredSessions]);
 
   useEffect(() => {
     if (searchMode !== 'conversations' || debouncedSearchQuery.length >= 2) {
@@ -467,6 +627,27 @@ export function useSidebarController({
     });
   }, [projects]);
 
+  useEffect(() => {
+    setOptimisticStarBySessionId((previous) => {
+      if (previous.size === 0) {
+        return previous;
+      }
+
+      const starredIds = new Set(starredSessions.map((session) => session.sessionId));
+      const next = new Map(previous);
+      let changed = false;
+
+      for (const [sessionId, optimisticValue] of previous.entries()) {
+        if (starredIds.has(sessionId) === optimisticValue) {
+          next.delete(sessionId);
+          changed = true;
+        }
+      }
+
+      return changed ? next : previous;
+    });
+  }, [starredSessions]);
+
   // Debounce search text updates so both project filtering and conversation
   // SSE requests avoid running on every keypress.
   useEffect(() => {
@@ -504,7 +685,7 @@ export function useSidebarController({
       return;
     }
 
-    const url = api.searchConversationsUrl(query);
+    const url = api.searchConversationsUrl(query, 50, isStarredSessionsOnly);
     const es = new EventSource(url);
     eventSourceRef.current = es;
 
@@ -596,7 +777,7 @@ export function useSidebarController({
         eventSourceRef.current = null;
       }
     };
-  }, [debouncedSearchQuery, searchMode]);
+  }, [debouncedSearchQuery, isStarredSessionsOnly, searchMode]);
 
   // All sidebar state keys (expanded, starred, loading, etc.) use the DB
   // `projectId` as their identifier after the migration.
@@ -714,6 +895,184 @@ export function useSidebarController({
     [resolveProjectStarState],
   );
 
+  // The fetched stars with in-flight toggles applied, so a row and every filter
+  // agree on one answer for "is this session starred".
+  const starredSessionIds = useMemo(() => {
+    const sessionIds = new Set(starredSessions.map((session) => session.sessionId));
+    for (const [sessionId, optimisticValue] of optimisticStarBySessionId.entries()) {
+      if (optimisticValue) {
+        sessionIds.add(sessionId);
+      } else {
+        sessionIds.delete(sessionId);
+      }
+    }
+    return sessionIds;
+  }, [optimisticStarBySessionId, starredSessions]);
+
+  const isSessionStarred = useCallback(
+    (sessionId: string) => starredSessionIds.has(sessionId),
+    [starredSessionIds],
+  );
+
+  const toggleStarSession = useCallback((sessionId: string) => {
+    const previousStarState =
+      sessionStarStateRef.current.get(sessionId) ?? starredSessionIds.has(sessionId);
+    const desiredStarState = !previousStarState;
+    sessionStarStateRef.current.set(sessionId, desiredStarState);
+    const latestSequence = (sessionStarToggleSequenceRef.current.get(sessionId) ?? 0) + 1;
+    sessionStarToggleSequenceRef.current.set(sessionId, latestSequence);
+
+    setOptimisticStarBySessionId((previous) => {
+      const next = new Map(previous);
+      next.set(sessionId, desiredStarState);
+      return next;
+    });
+
+    const previousRequest = sessionStarRequestQueueRef.current.get(sessionId) ?? Promise.resolve();
+    const updateStar = previousRequest
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          const response = await api.toggleSessionStar(sessionId, desiredStarState);
+          if (!response.ok) {
+            const payload = (await response.json()) as { error?: string | { message?: string } };
+            const errorPayload = payload.error;
+            const message =
+              typeof errorPayload === 'string'
+                ? errorPayload
+                : errorPayload && typeof errorPayload === 'object' && errorPayload.message
+                  ? errorPayload.message
+                  : t('messages.updateSessionError', 'Failed to update session. Please try again.');
+            throw new Error(message);
+          }
+
+          const payload = (await response.json()) as { data?: { isStarred?: unknown } };
+          if (typeof payload.data?.isStarred !== 'boolean') {
+            throw new Error('Session star response did not contain a valid state');
+          }
+          const serverStarState = payload.data.isStarred;
+
+          const isLatestSequence = sessionStarToggleSequenceRef.current.get(sessionId) === latestSequence;
+          if (!isLatestSequence) {
+            return;
+          }
+
+          sessionStarStateRef.current.set(sessionId, serverStarState);
+          setOptimisticStarBySessionId((previous) => {
+            const next = new Map(previous);
+            next.set(sessionId, serverStarState);
+            return next;
+          });
+
+          // The list carries the metadata the filtered views graft onto projects,
+          // so it is reread whenever a star lands.
+          await fetchStarredSessions();
+        } catch (error) {
+          const isLatestSequence = sessionStarToggleSequenceRef.current.get(sessionId) === latestSequence;
+          if (!isLatestSequence) {
+            return;
+          }
+
+          const refreshedSessions = await fetchStarredSessions();
+          if (sessionStarToggleSequenceRef.current.get(sessionId) !== latestSequence) {
+            return;
+          }
+
+          if (refreshedSessions) {
+            const serverStarState = refreshedSessions.some((session) => session.sessionId === sessionId);
+            sessionStarStateRef.current.set(sessionId, serverStarState);
+            setOptimisticStarBySessionId((previous) => {
+              const next = new Map(previous);
+              next.delete(sessionId);
+              return next;
+            });
+          } else {
+            sessionStarStateRef.current.set(sessionId, previousStarState);
+            setOptimisticStarBySessionId((previous) => {
+              const next = new Map(previous);
+              next.set(sessionId, previousStarState);
+              return next;
+            });
+          }
+
+          console.error('[Sidebar] Failed to toggle session star:', error);
+          alert(t('messages.updateSessionError', 'Failed to update session. Please try again.'));
+        }
+      });
+
+    let trackedRequest: Promise<void>;
+    trackedRequest = updateStar.finally(() => {
+      if (sessionStarRequestQueueRef.current.get(sessionId) === trackedRequest) {
+        sessionStarRequestQueueRef.current.delete(sessionId);
+      }
+    });
+    sessionStarRequestQueueRef.current.set(sessionId, trackedRequest);
+  }, [fetchStarredSessions, starredSessionIds, t]);
+
+  const toggleStarredSessionsOnly = useCallback(() => {
+    const nextValue = !isStarredSessionsOnly;
+    setIsStarredSessionsOnly(nextValue);
+    writeStarredSessionsOnly(nextValue);
+  }, [isStarredSessionsOnly]);
+
+  /**
+   * The fetched starred sessions with in-flight toggles applied.
+   *
+   * A session starred a moment ago is not in the fetched list yet, so its row
+   * metadata is taken from the loaded project pages — which is exactly where
+   * the star the user just clicked was rendered.
+   */
+  const resolvedStarredSessions = useMemo<StarredSessionListItem[]>(() => {
+    if (optimisticStarBySessionId.size === 0) {
+      return starredSessions;
+    }
+
+    const resolved = starredSessions.filter(
+      (session) => optimisticStarBySessionId.get(session.sessionId) !== false,
+    );
+    const resolvedIds = new Set(resolved.map((session) => session.sessionId));
+
+    for (const [sessionId, optimisticValue] of optimisticStarBySessionId.entries()) {
+      if (!optimisticValue || resolvedIds.has(sessionId)) {
+        continue;
+      }
+
+      for (const project of projects) {
+        const loadedSession = (project.sessions ?? []).find(
+          (session) => String(session.id) === sessionId,
+        );
+        if (!loadedSession) {
+          continue;
+        }
+
+        const sessionTitle =
+          typeof loadedSession.summary === 'string' && loadedSession.summary.trim().length > 0
+            ? loadedSession.summary
+            : typeof loadedSession.name === 'string' && loadedSession.name.trim().length > 0
+              ? loadedSession.name
+              : sessionId;
+
+        resolved.push({
+          sessionId,
+          provider: loadedSession.__provider ?? loadedSession.provider ?? 'claude',
+          projectId: project.projectId,
+          projectPath: project.fullPath ?? project.path ?? null,
+          projectDisplayName: project.displayName,
+          sessionTitle,
+          createdAt: loadedSession.createdAt ?? loadedSession.created_at ?? null,
+          updatedAt: loadedSession.updated_at ?? null,
+          lastActivity: loadedSession.lastActivity ?? null,
+          isArchived: false,
+          isProjectArchived: Boolean(project.isArchived),
+          isOneShot: loadedSession.isOneShot === true,
+        });
+        break;
+      }
+    }
+
+    return resolved;
+  }, [optimisticStarBySessionId, projects, starredSessions]);
+
   const getProjectSessions = useCallback((project: Project) => getAllSessions(project), []);
 
   const loadMoreSessionsForProject = useCallback(async (projectId: string) => {
@@ -779,33 +1138,159 @@ export function useSidebarController({
     [projectSortOrder, projectsWithResolvedStarState],
   );
 
-  const runningProjects = useMemo(
-    () => buildRunningProjects(
+  const runningProjects = useMemo(() => {
+    const projectsWithRunningSessions = buildRunningProjects(
       projectsWithResolvedStarState,
       runningSessionIds,
       recentWebSessions,
       projectSortOrder,
-    ),
-    [
-      projectSortOrder,
-      projectsWithResolvedStarState,
-      recentWebSessions,
-      runningSessionIds,
-    ],
+    );
+
+    if (!isStarredSessionsOnly) {
+      return projectsWithRunningSessions;
+    }
+
+    return projectsWithRunningSessions.reduce<Project[]>((acc, project) => {
+      const sessions = (project.sessions ?? []).filter(
+        (session) => starredSessionIds.has(String(session.id)),
+      );
+      if (sessions.length === 0) {
+        return acc;
+      }
+
+      acc.push({
+        ...project,
+        sessions,
+        sessionMeta: {
+          ...project.sessionMeta,
+          total: sessions.length,
+          hasMore: false,
+        },
+      });
+      return acc;
+    }, []);
+  }, [
+    isStarredSessionsOnly,
+    projectSortOrder,
+    projectsWithResolvedStarState,
+    recentWebSessions,
+    runningSessionIds,
+    starredSessionIds,
+  ]);
+
+  const starredProjects = useMemo(
+    () => buildStarredProjects(projectsWithResolvedStarState, resolvedStarredSessions, projectSortOrder),
+    [projectSortOrder, projectsWithResolvedStarState, resolvedStarredSessions],
   );
 
-  const filteredProjects = useMemo(
-    () => filterProjects(searchMode === 'running' ? runningProjects : sortedProjects, debouncedSearchQuery),
-    [debouncedSearchQuery, runningProjects, searchMode, sortedProjects],
-  );
+  const filteredProjects = useMemo(() => {
+    const visibleProjects = searchMode === 'running'
+      ? runningProjects
+      : isStarredSessionsOnly
+        ? starredProjects
+        : sortedProjects;
+
+    return filterProjects(visibleProjects, debouncedSearchQuery);
+  }, [
+    debouncedSearchQuery,
+    isStarredSessionsOnly,
+    runningProjects,
+    searchMode,
+    sortedProjects,
+    starredProjects,
+  ]);
+
+  // With the filter on, the recents view lists the starred sessions themselves:
+  // the paginated feed's pages would otherwise keep pulling in unstarred rows.
+  const visibleRecentConversations = useMemo<RecentConversationListItem[]>(() => {
+    if (!isStarredSessionsOnly) {
+      return recentConversations;
+    }
+
+    return resolvedStarredSessions
+      .filter((session) => !session.isArchived && !session.isProjectArchived && !session.isOneShot)
+      .sort((sessionA, sessionB) => (sessionB.lastActivity ?? '').localeCompare(sessionA.lastActivity ?? ''))
+      .map((session) => ({
+        sessionId: session.sessionId,
+        provider: session.provider,
+        projectId: session.projectId,
+        projectDisplayName: session.projectDisplayName,
+        sessionTitle: session.sessionTitle,
+        lastActivity: session.lastActivity,
+        isOneShot: false,
+      }));
+  }, [isStarredSessionsOnly, recentConversations, resolvedStarredSessions]);
+
+  const visibleConversationResults = useMemo<ConversationSearchResults | null>(() => {
+    if (!isStarredSessionsOnly || !conversationResults) {
+      return conversationResults;
+    }
+
+    const titleResults = conversationResults.titleResults.filter(
+      (session) => starredSessionIds.has(session.sessionId),
+    );
+    let totalMatches = 0;
+    const results = conversationResults.results.reduce<ConversationProjectResult[]>((acc, projectResult) => {
+      const sessions = projectResult.sessions.filter(
+        (session) => starredSessionIds.has(session.sessionId),
+      );
+      if (sessions.length === 0) {
+        return acc;
+      }
+
+      for (const session of sessions) {
+        totalMatches += session.matches.length;
+      }
+      acc.push({ ...projectResult, sessions });
+      return acc;
+    }, []);
+
+    return { ...conversationResults, results, titleResults, totalMatches };
+  }, [conversationResults, isStarredSessionsOnly, starredSessionIds]);
+
+  // The archive holds starred sessions too, so the filter applies to both the
+  // standalone rows and the sessions listed under an archived project.
+  const starFilteredArchivedSessions = useMemo(() => {
+    if (!isStarredSessionsOnly) {
+      return archivedSessions;
+    }
+
+    return archivedSessions.filter((session) => starredSessionIds.has(session.sessionId));
+  }, [archivedSessions, isStarredSessionsOnly, starredSessionIds]);
+
+  const starFilteredArchivedProjects = useMemo(() => {
+    if (!isStarredSessionsOnly) {
+      return archivedProjects;
+    }
+
+    return archivedProjects.reduce<ArchivedProjectListItem[]>((acc, project) => {
+      const sessions = (project.sessions ?? []).filter(
+        (session) => starredSessionIds.has(String(session.id)),
+      );
+      if (sessions.length === 0) {
+        return acc;
+      }
+
+      acc.push({
+        ...project,
+        sessions,
+        sessionMeta: {
+          ...project.sessionMeta,
+          total: sessions.length,
+          hasMore: false,
+        },
+      });
+      return acc;
+    }, []);
+  }, [archivedProjects, isStarredSessionsOnly, starredSessionIds]);
 
   const filteredArchivedSessions = useMemo(() => {
     const normalizedSearch = debouncedSearchQuery.trim().toLowerCase();
     if (!normalizedSearch) {
-      return archivedSessions;
+      return starFilteredArchivedSessions;
     }
 
-    return archivedSessions.filter((session) => {
+    return starFilteredArchivedSessions.filter((session) => {
       const searchableFields = [
         session.sessionTitle,
         session.projectDisplayName,
@@ -815,15 +1300,15 @@ export function useSidebarController({
 
       return searchableFields.some((value) => value.toLowerCase().includes(normalizedSearch));
     });
-  }, [archivedSessions, debouncedSearchQuery]);
+  }, [debouncedSearchQuery, starFilteredArchivedSessions]);
 
   const filteredArchivedProjects = useMemo(() => {
     const normalizedSearch = debouncedSearchQuery.trim().toLowerCase();
     if (!normalizedSearch) {
-      return archivedProjects;
+      return starFilteredArchivedProjects;
     }
 
-    return archivedProjects.filter((project) => {
+    return starFilteredArchivedProjects.filter((project) => {
       const projectMatches = [
         project.displayName,
         project.fullPath || '',
@@ -847,7 +1332,7 @@ export function useSidebarController({
         ].some((value) => value.toLowerCase().includes(normalizedSearch));
       });
     });
-  }, [archivedProjects, debouncedSearchQuery]);
+  }, [debouncedSearchQuery, starFilteredArchivedProjects]);
 
   // Keyed by projectId so the rename survives display-name mutations that arrive
   // while the input is open.
@@ -877,7 +1362,10 @@ export function useSidebarController({
       try {
         const response = await api.renameProject(projectId, nextName);
         if (response.ok) {
-          await paletteOps.refreshProjects();
+          await Promise.all([
+            paletteOps.refreshProjects(),
+            fetchStarredSessions(),
+          ]);
         } else {
           console.error('Failed to rename project');
         }
@@ -887,7 +1375,7 @@ export function useSidebarController({
         setActiveRename(null);
       }
     },
-    [paletteOps],
+    [fetchStarredSessions, paletteOps],
   );
 
   const showDeleteSessionConfirmation = useCallback(
@@ -919,7 +1407,10 @@ export function useSidebarController({
 
       if (response.ok) {
         onSessionDelete?.(sessionId);
-        await fetchArchivedSessions();
+        await Promise.all([
+          fetchArchivedSessions(),
+          fetchStarredSessions(),
+        ]);
       } else {
         const errorText = await response.text();
         console.error('[Sidebar] Failed to delete session:', {
@@ -932,7 +1423,7 @@ export function useSidebarController({
       console.error('[Sidebar] Error deleting session:', error);
       alert(t('messages.deleteSessionError'));
     }
-  }, [fetchArchivedSessions, onSessionDelete, pendingDeletion, t]);
+  }, [fetchArchivedSessions, fetchStarredSessions, onSessionDelete, pendingDeletion, t]);
 
   const requestProjectDelete = useCallback(
     (project: Project) => {
@@ -962,6 +1453,7 @@ export function useSidebarController({
 
       if (response.ok) {
         onProjectDelete?.(project.projectId);
+        await fetchStarredSessions();
       } else {
         const data = (await response.json()) as { error?: string | { message?: string } };
         const err = data.error;
@@ -979,7 +1471,7 @@ export function useSidebarController({
         return next;
       });
     }
-  }, [pendingDeletion, onProjectDelete, t]);
+  }, [fetchStarredSessions, pendingDeletion, onProjectDelete, t]);
 
   const handleProjectSelect = useCallback(
     (project: Project) => {
@@ -1037,12 +1529,13 @@ export function useSidebarController({
       await Promise.all([
         Promise.resolve(onRefresh()),
         fetchArchivedSessions(),
+        fetchStarredSessions(),
       ]);
     } catch (error) {
       console.error('[Sidebar] Error restoring project:', error);
       alert(t('messages.restoreProjectError', 'Error restoring project. Please try again.'));
     }
-  }, [fetchArchivedSessions, onRefresh, t]);
+  }, [fetchArchivedSessions, fetchStarredSessions, onRefresh, t]);
 
   const restoreArchivedSession = useCallback(async (sessionId: string) => {
     try {
@@ -1060,12 +1553,13 @@ export function useSidebarController({
       await Promise.all([
         Promise.resolve(onRefresh()),
         fetchArchivedSessions(),
+        fetchStarredSessions(),
       ]);
     } catch (error) {
       console.error('[Sidebar] Error restoring session:', error);
       alert(t('messages.restoreSessionError', 'Error restoring session. Please try again.'));
     }
-  }, [fetchArchivedSessions, onRefresh, t]);
+  }, [fetchArchivedSessions, fetchStarredSessions, onRefresh, t]);
 
   const refreshProjects = useCallback(async () => {
     setIsRefreshing(true);
@@ -1075,6 +1569,7 @@ export function useSidebarController({
         Promise.resolve(onRefresh()),
         onHydrateRunningSessions(refreshedSessionIds ?? runningSessionIds),
         fetchArchivedSessions(),
+        fetchStarredSessions(),
         searchMode === 'conversations'
           ? fetchRecentConversationsPage(0, false)
           : Promise.resolve(),
@@ -1084,6 +1579,7 @@ export function useSidebarController({
     }
   }, [
     fetchArchivedSessions,
+    fetchStarredSessions,
     fetchRecentConversationsPage,
     onHydrateRunningSessions,
     onRefresh,
@@ -1104,7 +1600,10 @@ export function useSidebarController({
       try {
         const response = await api.renameSession(sessionId, trimmed);
         if (response.ok) {
-          await onRefresh();
+          await Promise.all([
+            onRefresh(),
+            fetchStarredSessions(),
+          ]);
         } else {
           console.error('[Sidebar] Failed to rename session:', response.status);
           alert(t('messages.renameSessionFailed'));
@@ -1116,7 +1615,7 @@ export function useSidebarController({
         setActiveRename(null);
       }
     },
-    [onRefresh, t],
+    [fetchStarredSessions, onRefresh, t],
   );
 
   /**
@@ -1174,14 +1673,16 @@ export function useSidebarController({
     runningSessionsCount,
     archivedProjects: filteredArchivedProjects,
     archivedSessions: filteredArchivedSessions,
-    archivedSessionsCount: archivedProjects.length + archivedSessions.length,
+    archivedSessionsCount: starFilteredArchivedProjects.length + starFilteredArchivedSessions.length,
     isArchivedSessionsLoading,
-    recentConversations,
-    recentConversationsTotal,
-    recentConversationsHasMore,
-    isRecentConversationsLoading,
+    recentConversations: visibleRecentConversations,
+    recentConversationsTotal: isStarredSessionsOnly ? visibleRecentConversations.length : recentConversationsTotal,
+    // Pagination and the error/loading states belong to the recents feed, which
+    // the starred filter replaces outright.
+    recentConversationsHasMore: isStarredSessionsOnly ? false : recentConversationsHasMore,
+    isRecentConversationsLoading: isStarredSessionsOnly ? false : isRecentConversationsLoading,
     isLoadingMoreRecentConversations,
-    recentConversationsError,
+    recentConversationsError: isStarredSessionsOnly ? false : recentConversationsError,
     reloadRecentConversations,
     loadMoreRecentConversations,
     toggleProject,
@@ -1189,6 +1690,13 @@ export function useSidebarController({
     forkSession,
     toggleStarProject,
     isProjectStarred,
+    isSessionStarred,
+    toggleStarSession,
+    isStarredSessionsOnly,
+    toggleStarredSessionsOnly,
+    isStarredSessionsLoading,
+    starredSessionsError,
+    starredSessionsLoaded,
     getProjectSessions,
     loadMoreSessionsForProject,
     startEditingProject,
@@ -1212,7 +1720,7 @@ export function useSidebarController({
     setShowNewProject,
     searchMode,
     setSearchMode,
-    conversationResults,
+    conversationResults: visibleConversationResults,
     isSearching,
     searchProgress,
     clearConversationResults: useCallback(() => {

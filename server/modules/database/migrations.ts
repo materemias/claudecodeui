@@ -263,9 +263,11 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
 
   if (!shouldRebuild) {
     addColumnToTableIfNotExists(db, 'sessions', columnNames, 'jsonl_path', 'TEXT');
+    addColumnToTableIfNotExists(db, 'sessions', columnNames, 'isStarred', 'BOOLEAN DEFAULT 0');
     addColumnToTableIfNotExists(db, 'sessions', columnNames, 'isArchived', 'BOOLEAN DEFAULT 0');
     addColumnToTableIfNotExists(db, 'sessions', columnNames, 'created_at', 'DATETIME');
     addColumnToTableIfNotExists(db, 'sessions', columnNames, 'updated_at', 'DATETIME');
+    db.exec('UPDATE sessions SET isStarred = COALESCE(isStarred, 0)');
     db.exec('UPDATE sessions SET isArchived = COALESCE(isArchived, 0)');
     db.exec('UPDATE sessions SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)');
     db.exec('UPDATE sessions SET updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)');
@@ -292,6 +294,10 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
     ? 'jsonl_path'
     : 'NULL';
 
+  const isStarredExpression = columnNames.includes('isStarred')
+    ? 'COALESCE(isStarred, 0)'
+    : '0';
+
   const isArchivedExpression = columnNames.includes('isArchived')
     ? 'COALESCE(isArchived, 0)'
     : '0';
@@ -315,6 +321,7 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
         custom_name TEXT,
         project_path TEXT,
         jsonl_path TEXT,
+        isStarred BOOLEAN DEFAULT 0,
         isArchived BOOLEAN DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -332,6 +339,7 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
           ${customNameExpression} AS custom_name,
           ${projectPathExpression} AS project_path,
           ${jsonlPathExpression} AS jsonl_path,
+          ${isStarredExpression} AS isStarred,
           ${isArchivedExpression} AS isArchived,
           ${createdAtExpression} AS created_at,
           ${updatedAtExpression} AS updated_at,
@@ -346,6 +354,7 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
           custom_name,
           project_path,
           jsonl_path,
+          isStarred,
           isArchived,
           created_at,
           updated_at,
@@ -361,6 +370,7 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
         custom_name,
         project_path,
         jsonl_path,
+        isStarred,
         isArchived,
         created_at,
         updated_at
@@ -371,6 +381,7 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
         custom_name,
         project_path,
         jsonl_path,
+        isStarred,
         isArchived,
         created_at,
         updated_at
@@ -614,6 +625,7 @@ export const runMigrations = (db: Database) => {
     // The due-message poll runs on a timer; without this it table-scans.
     db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, scheduled_for)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_messages_session ON scheduled_messages(session_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_is_starred ON sessions(isStarred)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_is_archived ON sessions(isArchived)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_starred ON projects(isStarred)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_archived ON projects(isArchived)');

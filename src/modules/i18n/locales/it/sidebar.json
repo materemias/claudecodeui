@@ -42,7 +42,9 @@
     "renameProject": "Rinomina progetto (F2)",
     "deleteProject": "Rimuovi progetto dalla barra laterale (Canc)",
     "addToFavorites": "Aggiungi ai preferiti",
+    "addSessionToFavorites": "Aggiungi sessione ai preferiti",
     "removeFromFavorites": "Rimuovi dai preferiti",
+    "removeSessionFromFavorites": "Rimuovi sessione dai preferiti",
     "editSessionName": "Modifica manualmente il nome della sessione",
     "deleteSession": "Elimina questa sessione permanentemente",
     "activeSessionIndicator": "Sessione attiva di recente (ultimi 10 minuti)",
@@ -114,7 +116,8 @@
     "restoreProjectError": "Errore durante il ripristino del progetto. Riprova.",
     "restoreSessionFailed": "Impossibile ripristinare la sessione. Riprova.",
     "restoreSessionError": "Errore durante il ripristino della sessione. Riprova.",
-    "forkSessionError": "Impossibile creare un ramo da questa sessione. Riprova."
+    "forkSessionError": "Impossibile creare un ramo da questa sessione. Riprova.",
+    "noStarredSessions": "Nessuna sessione preferita"
   },
   "version": {
     "updateAvailable": "Aggiornamento disponibile",
@@ -123,6 +126,7 @@
   "search": {
     "modeProjects": "Progetti",
     "modeConversations": "Conversazioni",
+    "starredOnlyTooltip": "Solo sessioni preferite",
     "conversationsPlaceholder": "Cerca nelle conversazioni...",
     "searching": "Ricerca in corso...",
     "sessionTitles": "Titoli delle sessioni",

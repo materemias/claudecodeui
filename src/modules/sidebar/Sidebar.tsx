@@ -133,6 +133,13 @@ function Sidebar({
     handleSessionClick,
     toggleStarProject,
     isProjectStarred,
+    isSessionStarred,
+    toggleStarSession,
+    isStarredSessionsOnly,
+    isStarredSessionsLoading,
+    starredSessionsError,
+    starredSessionsLoaded,
+    toggleStarredSessionsOnly,
     getProjectSessions,
     loadingMoreProjects,
     loadMoreSessionsForProject,
@@ -229,10 +236,12 @@ function Sidebar({
     terminalRunningSessions,
     attentionSessionIds,
     isProjectStarred,
+    isSessionStarred,
     onRenameDraftChange: updateRenameDraft,
     onToggleProject: toggleProject,
     onProjectSelect: handleProjectSelect,
     onToggleStarProject: toggleStarProject,
+    onToggleStarSession: toggleStarSession,
     onStartEditingProject: startEditingProject,
     onCancelEditingProject: cancelRename,
     onSaveProjectName: handleSaveProjectName,
@@ -302,6 +311,13 @@ function Sidebar({
             onSearchFilterChange={setSearchFilter}
             onClearSearchFilter={() => setSearchFilter('')}
             searchMode={searchMode}
+            isStarredSessionsOnly={isStarredSessionsOnly}
+            onToggleStarredSessionsOnly={toggleStarredSessionsOnly}
+            isStarredSessionsLoading={isStarredSessionsLoading}
+            starredSessionsError={starredSessionsError}
+            starredSessionsLoaded={starredSessionsLoaded}
+            isSessionStarred={isSessionStarred}
+            onToggleStarSession={toggleStarSession}
             onSearchModeChange={(mode) => {
               setSearchMode(mode);
               if (mode === 'projects') clearConversationResults();

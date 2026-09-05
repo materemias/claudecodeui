@@ -40,3 +40,28 @@ export const clearLegacyStarredProjectIds = () => {
     // Keep UI responsive even if storage is unavailable.
   }
 };
+
+const STARRED_SESSIONS_ONLY_STORAGE_KEY = 'sidebarStarredSessionsOnly';
+
+/**
+ * Reads whether the sidebar is filtered to starred sessions only.
+ *
+ * Kept in localStorage rather than the server-backed preferences because it is
+ * a view filter of the device in front of the user, not an account setting.
+ */
+export const readStarredSessionsOnly = (): boolean => {
+  try {
+    return localStorage.getItem(STARRED_SESSIONS_ONLY_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+/** Persists the starred-sessions-only filter so it survives a reload. */
+export const writeStarredSessionsOnly = (value: boolean): void => {
+  try {
+    localStorage.setItem(STARRED_SESSIONS_ONLY_STORAGE_KEY, value ? 'true' : 'false');
+  } catch {
+    // Keep UI responsive even if storage is unavailable.
+  }
+};

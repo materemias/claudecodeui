@@ -105,6 +105,30 @@ export type RunningSession =
     };
 
 /**
+ * One starred session returned by the starred-sessions API.
+ *
+ * Carries enough project metadata for the sidebar to label, group, and open the
+ * row from any of its views without a per-row follow-up query. Archived
+ * sessions are included, because the starred filter also applies to the archive
+ * view; `isArchived` and `isProjectArchived` let the client decide which rows
+ * belong in the collection it is currently rendering.
+ */
+export type StarredSessionListItem = {
+  sessionId: string;
+  provider: LLMProvider;
+  projectId: string | null;
+  projectPath: string | null;
+  projectDisplayName: string;
+  sessionTitle: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  lastActivity: string | null;
+  isArchived: boolean;
+  isProjectArchived: boolean;
+  isOneShot: boolean;
+};
+
+/**
  * One selectable model row in a provider model catalog.
  */
 export type ProviderModelOption = {

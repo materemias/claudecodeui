@@ -1346,10 +1346,12 @@ export type SidebarProjectListProps = {
   terminalRunningSessions: TerminalRunningSessionMap;
   attentionSessionIds: ReadonlySet<string>;
   isProjectStarred: (projectId: string) => boolean;
+  isSessionStarred: (sessionId: string) => boolean;
   onRenameDraftChange: (draft: string) => void;
   onToggleProject: (projectId: string) => void;
   onProjectSelect: (project: Project) => void;
   onToggleStarProject: (projectId: string) => void;
+  onToggleStarSession: (sessionId: string) => void;
   onStartEditingProject: (project: Project) => void;
   onCancelEditingProject: () => void;
   onSaveProjectName: (projectId: string, nextName: string) => void;
@@ -1399,6 +1401,28 @@ export type RecentConversationListItem = Pick<
   ArchivedSessionListItem,
   'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity' | 'isOneShot'
 >;
+
+/**
+ * One starred session as returned by the starred-sessions API.
+ *
+ * Carries its own project identity, and both archived flags, because the
+ * endpoint returns every starred session — including archived ones and ones
+ * whose project is archived — so the archive view can filter with it too.
+ */
+export type StarredSessionListItem = {
+  sessionId: string;
+  provider: LLMProvider;
+  projectId: string | null;
+  projectPath: string | null;
+  projectDisplayName: string;
+  sessionTitle: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  lastActivity: string | null;
+  isArchived: boolean;
+  isProjectArchived: boolean;
+  isOneShot: boolean;
+};
 
 /**
  * The rename the sidebar currently has open, if any.

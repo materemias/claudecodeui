@@ -42,7 +42,9 @@
     "renameProject": "Renommer le projet (F2)",
     "deleteProject": "Retirer le projet de la barre latérale (Suppr)",
     "addToFavorites": "Ajouter aux favoris",
+    "addSessionToFavorites": "Ajouter la session aux favoris",
     "removeFromFavorites": "Retirer des favoris",
+    "removeSessionFromFavorites": "Retirer la session des favoris",
     "editSessionName": "Modifier manuellement le nom de la session",
     "deleteSession": "Supprimer définitivement cette session",
     "activeSessionIndicator": "Session récemment active (10 dernières minutes)",
@@ -114,7 +116,8 @@
     "restoreProjectError": "Erreur lors de la restauration du projet. Veuillez réessayer.",
     "restoreSessionFailed": "Échec de la restauration de la session. Veuillez réessayer.",
     "restoreSessionError": "Erreur lors de la restauration de la session. Veuillez réessayer.",
-    "forkSessionError": "Impossible de dupliquer cette session. Veuillez réessayer."
+    "forkSessionError": "Impossible de dupliquer cette session. Veuillez réessayer.",
+    "noStarredSessions": "Aucune session favorite"
   },
   "version": {
     "updateAvailable": "Mise à jour disponible",
@@ -123,6 +126,7 @@
   "search": {
     "modeProjects": "Projets",
     "modeConversations": "Conversations",
+    "starredOnlyTooltip": "Sessions favorites uniquement",
     "conversationsPlaceholder": "Rechercher dans les conversations...",
     "searching": "Recherche en cours...",
     "sessionTitles": "Titres des sessions",

@@ -12,7 +12,9 @@ import type {
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  ProjectRepositoryRow,
   RunningSession,
+  StarredSessionListItem,
 } from '@/shared/types.js';
 import { AppError, buildCloudCliSessionName, sliceTailPage } from '@/shared/utils.js';
 
@@ -597,6 +599,43 @@ export const sessionsService = {
         createdAt: session.created_at ?? null,
         updatedAt: session.updated_at ?? null,
         lastActivity: session.updated_at ?? session.created_at ?? null,
+        isProjectArchived: Boolean(project?.isArchived),
+        isOneShot: Boolean(session.is_one_shot),
+      };
+    });
+  },
+
+  /**
+   * Returns every starred session, archived ones included, so the sidebar can
+   * apply its starred filter in all of its views from a single fetch. One-shot
+   * runs are excluded because they never appear in persistent lists.
+   */
+  listStarredSessions(): StarredSessionListItem[] {
+    const starredSessions = sessionsDb.getStarredSessions();
+    const projectCache = new Map<string, ProjectRepositoryRow | null>();
+
+    return starredSessions.map((session) => {
+      const projectPath = session.project_path?.trim() ? session.project_path : null;
+      let project: ProjectRepositoryRow | null = null;
+
+      if (projectPath) {
+        if (!projectCache.has(projectPath)) {
+          projectCache.set(projectPath, projectsDb.getProjectPath(projectPath));
+        }
+        project = projectCache.get(projectPath) ?? null;
+      }
+
+      return {
+        sessionId: session.session_id,
+        provider: session.provider as LLMProvider,
+        projectId: project?.project_id ?? null,
+        projectPath,
+        projectDisplayName: resolveProjectDisplayName(projectPath, project?.custom_project_name),
+        sessionTitle: session.custom_name?.trim() || session.session_id,
+        createdAt: session.created_at ?? null,
+        updatedAt: session.updated_at ?? null,
+        lastActivity: session.updated_at ?? session.created_at ?? null,
+        isArchived: Boolean(session.isArchived),
         isProjectArchived: Boolean(project?.isArchived),
         isOneShot: Boolean(session.is_one_shot),
       };

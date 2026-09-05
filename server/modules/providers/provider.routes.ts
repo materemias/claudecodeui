@@ -7,6 +7,7 @@ import { providerModelsService } from '@/modules/providers/services/provider-mod
 import { providerTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
+import { toggleSessionStar } from '@/modules/providers/services/session-star.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/index.js';
 import type {
@@ -788,6 +789,14 @@ router.get(
 );
 
 router.get(
+  '/sessions/starred',
+  asyncHandler(async (_req: Request, res: Response) => {
+    const sessions = sessionsService.listStarredSessions();
+    res.json(createApiSuccessResponse({ sessions }));
+  }),
+);
+
+router.get(
   '/sessions/:sessionId/provider-id',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
@@ -840,6 +849,24 @@ router.post(
 );
 
 router.post(
+  '/sessions/:sessionId/toggle-star',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const desiredState = body.isStarred;
+    if (desiredState !== undefined && typeof desiredState !== 'boolean') {
+      throw new AppError('isStarred must be a boolean when provided.', {
+        code: 'INVALID_SESSION_STAR_STATE',
+        statusCode: 400,
+      });
+    }
+
+    const result = toggleSessionStar(sessionId, desiredState);
+    res.json(createApiSuccessResponse(result));
+  }),
+);
+
+router.post(
   '/sessions/:sessionId/fork',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
@@ -876,6 +903,7 @@ router.get(
 router.get('/search/sessions', asyncHandler(async (req: Request, res: Response) => {
   const query = parseSessionSearchQuery(req.query.q);
   const limit = parseSessionSearchLimit(req.query.limit);
+  const starredOnly = parseOptionalBooleanQuery(req.query.starredOnly, 'starredOnly') ?? false;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -895,6 +923,7 @@ router.get('/search/sessions', asyncHandler(async (req: Request, res: Response) 
     await sessionConversationsSearchService.search({
       query,
       limit,
+      starredOnly,
       signal: abortController.signal,
       onTitleResults: (titleResults) => {
         if (!closed) {

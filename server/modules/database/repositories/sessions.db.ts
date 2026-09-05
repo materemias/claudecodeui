@@ -38,6 +38,8 @@ export type SessionRow = {
   forked_from_session_id: string | null;
   /** One for non-interactive provider CLI sessions, zero for interactive sessions. */
   is_one_shot: number;
+  /** 1 while the user has pinned this session to the starred sidebar filter. */
+  isStarred: number;
   isArchived: number;
   created_at: string;
   updated_at: string;
@@ -49,7 +51,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, name_source, provider_name, model, effort, live_model, live_effort, model_dirty, effort_dirty, forked_from_session_id, is_one_shot, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, name_source, provider_name, model, effort, live_model, live_effort, model_dirty, effort_dirty, forked_from_session_id, is_one_shot, isStarred, isArchived, created_at, updated_at';
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -159,6 +161,8 @@ export const sessionsDb = {
       return existing.session_id;
     }
 
+    // Neither this UPDATE nor the INSERT below writes `isStarred`: a rescan of
+    // an already-starred session must leave the user's star in place.
     // Sessions created outside the app (directly via the provider CLI) are
     // keyed by the provider-native id for both columns. The ON CONFLICT path
     // covers legacy rows that predate the provider_session_id mapping.
@@ -250,11 +254,24 @@ export const sessionsDb = {
     // id is the provider-native one, which is what this row claims, so replace
     // it rather than leaving two sidebar entries for one conversation.
     db.transaction(() => {
-      db.prepare('DELETE FROM sessions WHERE session_id = ? AND session_id <> ?')
-        .run(input.providerSessionId, input.sessionId);
+      const duplicateRows = db.prepare(
+        `SELECT isStarred FROM sessions
+         WHERE (session_id = ? OR provider_session_id = ?)
+           AND session_id <> ?`,
+      ).all(
+        input.providerSessionId,
+        input.providerSessionId,
+        input.sessionId,
+      ) as Array<{ isStarred?: number }>;
+      const duplicateIsStarred = duplicateRows.some((row) => row.isStarred === 1);
       db.prepare(
-        `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, name_source, project_path, jsonl_path, model, effort, forked_from_session_id, isArchived, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        `DELETE FROM sessions
+         WHERE (session_id = ? OR provider_session_id = ?)
+           AND session_id <> ?`,
+      ).run(input.providerSessionId, input.providerSessionId, input.sessionId);
+      db.prepare(
+        `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, name_source, project_path, jsonl_path, model, effort, forked_from_session_id, isStarred, isArchived, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       ).run(
         input.sessionId,
         input.provider,
@@ -265,6 +282,7 @@ export const sessionsDb = {
         input.model,
         input.effort,
         input.forkedFromSessionId,
+        duplicateIsStarred ? 1 : 0,
       );
     })();
 
@@ -305,6 +323,7 @@ export const sessionsDb = {
              END,
              custom_name = COALESCE(custom_name, ?),
              is_one_shot = 0,
+             isStarred = CASE WHEN isStarred = 1 OR ? = 1 THEN 1 ELSE 0 END,
              updated_at = CURRENT_TIMESTAMP
            WHERE session_id = ?`
         ).run(
@@ -312,6 +331,7 @@ export const sessionsDb = {
           duplicate.jsonl_path,
           duplicate.name_source,
           duplicate.custom_name,
+          duplicate.isStarred,
           sessionId,
         );
         return;
@@ -348,23 +368,30 @@ export const sessionsDb = {
     },
   ): void {
     const db = getConnection();
-
     db.transaction(() => {
-      const indexedReplacement = db.prepare(
-        `SELECT jsonl_path FROM sessions
+
+      const indexedReplacements = db.prepare(
+        `SELECT session_id, jsonl_path, isStarred FROM sessions
          WHERE (session_id = ? OR provider_session_id = ?)
-           AND session_id <> ?
-         LIMIT 1`,
-      ).get(
+           AND session_id <> ?`,
+      ).all(
         input.providerSessionId,
         input.providerSessionId,
         sessionId,
-      ) as { jsonl_path: string | null } | undefined;
-      db.prepare('DELETE FROM sessions WHERE session_id = ? AND session_id <> ?')
-        .run(input.providerSessionId, sessionId);
+      ) as Array<{ session_id: string; jsonl_path: string | null; isStarred?: number }>;
+      const indexedReplacement = indexedReplacements[0];
+      const indexedReplacementIsStarred = indexedReplacements.some(
+        (replacement) => replacement.isStarred === 1,
+      );
+      db.prepare(
+        `DELETE FROM sessions
+         WHERE (session_id = ? OR provider_session_id = ?)
+           AND session_id <> ?`,
+      ).run(input.providerSessionId, input.providerSessionId, sessionId);
       db.prepare(
         `UPDATE sessions SET
            provider_session_id = ?,
+           isStarred = CASE WHEN isStarred = 1 OR ? = 1 THEN 1 ELSE 0 END,
            jsonl_path = ?,
            live_model = CASE WHEN ? THEN NULL ELSE live_model END,
            live_effort = CASE WHEN ? THEN NULL ELSE live_effort END,
@@ -374,6 +401,7 @@ export const sessionsDb = {
          WHERE session_id = ?`
       ).run(
         input.providerSessionId,
+        indexedReplacementIsStarred ? 1 : 0,
         input.jsonlPath ?? indexedReplacement?.jsonl_path ?? null,
         input.resetLiveConfig ? 1 : 0,
         input.resetLiveConfig ? 1 : 0,
@@ -751,6 +779,26 @@ export const sessionsDb = {
     return normalizeSessionRows(rows);
   },
 
+  /**
+   * Starred rows deliberately include archived sessions: the sidebar's starred
+   * filter applies to every view, including the archive one, so the caller
+   * decides which of them belong in the collection it is rendering.
+   */
+  getStarredSessions(): SessionRow[] {
+    const db = getConnection();
+    const rows = db
+      .prepare(
+        `SELECT ${SESSION_ROW_COLUMNS}
+         FROM sessions
+         WHERE isStarred = 1
+           AND is_one_shot = 0
+         ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
+      )
+      .all() as SessionRow[];
+
+    return normalizeSessionRows(rows);
+  },
+
   getSessionsByProjectPath(projectPath: string): SessionRow[] {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPath(projectPath);
@@ -835,6 +883,19 @@ export const sessionsDb = {
       .get(sessionId, provider) as { custom_name: string | null } | undefined;
 
     return row?.custom_name ?? null;
+  },
+
+  /**
+   * Star and unstar share one flag update; the star is independent of archival
+   * so a starred session keeps its star while archived.
+   */
+  updateSessionIsStarred(sessionId: string, isStarred: boolean): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET isStarred = ?
+       WHERE session_id = ?`
+    ).run(isStarred ? 1 : 0, sessionId);
   },
 
   /**

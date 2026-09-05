@@ -59,6 +59,7 @@ export type SessionConversationSearchProgressUpdate = {
 type SearchSessionConversationsInput = {
   query: string;
   limit: number;
+  starredOnly?: boolean;
   signal?: AbortSignal;
   onTitleResults?: (results: SessionTitleSearchResult[]) => void;
   onProgress?: (update: SessionConversationSearchProgressUpdate) => void;
@@ -1266,6 +1267,7 @@ export async function searchConversations(
   onProjectResult: ((update: SessionConversationSearchProgressUpdate) => void) | null = null,
   signal: AbortSignal | null = null,
   onTitleResults: ((results: SessionTitleSearchResult[]) => void) | null = null,
+  starredOnly = false,
 ): Promise<{
   results: ProjectConversationResult[];
   titleResults: SessionTitleSearchResult[];
@@ -1287,7 +1289,8 @@ export async function searchConversations(
   }
 
   const activeSessions = sessionsDb.getAllSessions()
-    .filter((session) => !Boolean(session.is_one_shot));
+    .filter((session) => session.is_one_shot !== 1)
+    .filter((session) => !starredOnly || Boolean(session.isStarred));
   const titleResults = findSessionTitleResults(activeSessions, safeQuery, safeLimit);
   onTitleResults?.(titleResults);
 
@@ -1437,6 +1440,7 @@ export const sessionConversationsSearchService = {
       input.onProgress ?? null,
       input.signal ?? null,
       input.onTitleResults ?? null,
+      input.starredOnly ?? false,
     );
   },
 };

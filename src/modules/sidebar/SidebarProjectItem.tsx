@@ -40,6 +40,9 @@ type SidebarProjectItemProps = {
   onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   onForkSession?: (session: SessionWithProvider) => void;
+  /** Star state stays a lookup so toggling one session does not change props on the others. */
+  isSessionStarred: (sessionId: string) => boolean;
+  onToggleStarSession: (sessionId: string) => void;
   onLoadMoreSessions: (projectId: string) => void;
   activeSessions: ReadonlySet<string>;
   terminalRunningSessions: TerminalRunningSessionMap;
@@ -85,6 +88,8 @@ function SidebarProjectItem({
   onSessionSelect,
   onDeleteSession,
   onForkSession,
+  isSessionStarred,
+  onToggleStarSession,
   onLoadMoreSessions,
   activeSessions,
   terminalRunningSessions,
@@ -454,6 +459,8 @@ function SidebarProjectItem({
         onSessionSelect={onSessionSelect}
         onDeleteSession={onDeleteSession}
         onForkSession={onForkSession}
+        isSessionStarred={isSessionStarred}
+        onToggleStarSession={onToggleStarSession}
         onLoadMoreSessions={onLoadMoreSessions}
         onNewSession={onNewSession}
         t={t}

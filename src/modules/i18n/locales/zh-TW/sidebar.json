@@ -42,7 +42,9 @@
     "renameProject": "重新命名專案 (F2)",
     "deleteProject": "從側邊欄移除專案 (Delete)",
     "addToFavorites": "加入收藏",
+    "addSessionToFavorites": "將工作階段加入收藏",
     "removeFromFavorites": "從收藏移除",
+    "removeSessionFromFavorites": "從收藏移除工作階段",
     "editSessionName": "手動編輯工作階段名稱",
     "deleteSession": "永久刪除此工作階段",
     "save": "儲存",
@@ -113,7 +115,8 @@
     "restoreProjectError": "還原專案時出錯，請重試。",
     "restoreSessionFailed": "還原工作階段失敗，請重試。",
     "restoreSessionError": "還原工作階段時出錯，請重試。",
-    "forkSessionError": "無法分支此工作階段，請再試一次。"
+    "forkSessionError": "無法分支此工作階段，請再試一次。",
+    "noStarredSessions": "沒有收藏的工作階段"
   },
   "version": {
     "updateAvailable": "有可用更新",
@@ -122,6 +125,7 @@
   "search": {
     "modeProjects": "專案",
     "modeConversations": "對話",
+    "starredOnlyTooltip": "僅顯示收藏的工作階段",
     "conversationsPlaceholder": "搜尋對話內容...",
     "searching": "搜尋中...",
     "sessionTitles": "工作階段標題",

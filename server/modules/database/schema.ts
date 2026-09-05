@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Non-interactive provider CLI invocations stay queryable by direct id but
     -- do not belong in sidebar collections.
     is_one_shot BOOLEAN DEFAULT 0,
+    isStarred BOOLEAN DEFAULT 0,
     isArchived BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -67,6 +67,7 @@ const NOW = new Date('2026-08-21T10:00:00.000Z');
 // Rebuilding them per render here would test the harness, not the component.
 const NO_SESSION_IDS: ReadonlySet<string> = new Set<string>();
 const NO_TERMINAL_SESSIONS: TerminalRunningSessionMap = new Map();
+const NO_STARS = () => false;
 
 const listProps = (activeRename: ActiveSidebarRename | null): SidebarProjectListProps => ({
   projects: [PROJECT_A, PROJECT_B],
@@ -89,6 +90,8 @@ const listProps = (activeRename: ActiveSidebarRename | null): SidebarProjectList
   terminalRunningSessions: NO_TERMINAL_SESSIONS,
   attentionSessionIds: NO_SESSION_IDS,
   isProjectStarred: () => false,
+  isSessionStarred: NO_STARS,
+  onToggleStarSession: noop,
   onRenameDraftChange: noop,
   onToggleProject: noop,
   onProjectSelect: noop,
@@ -206,6 +209,7 @@ const sessionsProps = (
   sessionRenameId: string | null,
   sessionRenameDraft: string,
   terminalRunningSessions: TerminalRunningSessionMap = NO_TERMINAL_SESSIONS,
+  isSessionStarred: (sessionId: string) => boolean = NO_STARS,
 ) => ({
   project: PROJECT_A,
   isExpanded: true,
@@ -227,6 +231,8 @@ const sessionsProps = (
   onProjectSelect: noop,
   onSessionSelect: noop,
   onDeleteSession: noop,
+  isSessionStarred,
+  onToggleStarSession: noop,
   onLoadMoreSessions: noop,
   onNewSession: noop,
   t,
@@ -266,6 +272,30 @@ test('terminal source reaches only the matching provider session row', () => {
 
   assert.equal(recordedSessionRowProps[0].isTerminal, true);
   assert.equal(recordedSessionRowProps[1].isTerminal, false);
+});
+
+test('star state reaches each session row as a resolved boolean', () => {
+  const STARRED: Record<string, true> = { a1: true };
+
+  const { rerender } = render(React.createElement(
+    SidebarProjectSessions,
+    sessionsProps(null, '', NO_TERMINAL_SESSIONS, (sessionId) => STARRED[sessionId] === true),
+  ));
+  const [firstA1, firstA2] = recordedSessionRowProps;
+
+  assert.equal(firstA1.isStarred, true);
+  assert.equal(firstA2.isStarred, false);
+
+  // The controller hands down a fresh lookup on every render. Rows must be
+  // handed the resolved boolean instead, or one star toggle re-renders them all.
+  rerender(React.createElement(
+    SidebarProjectSessions,
+    sessionsProps(null, '', NO_TERMINAL_SESSIONS, (sessionId) => STARRED[sessionId] === true),
+  ));
+  const [, , secondA1, secondA2] = recordedSessionRowProps;
+
+  assert.deepEqual(changedProps(firstA1, secondA1), []);
+  assert.deepEqual(changedProps(firstA2, secondA2), []);
 });
 
 test('the sorted session list is the same array until the project itself changes', () => {

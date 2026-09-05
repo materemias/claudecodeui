@@ -42,7 +42,9 @@
     "renameProject": "Rename project (F2)",
     "deleteProject": "Remove project from sidebar (Delete)",
     "addToFavorites": "Add to favorites",
+    "addSessionToFavorites": "Star session",
     "removeFromFavorites": "Remove from favorites",
+    "removeSessionFromFavorites": "Unstar session",
     "editSessionName": "Manually edit session name",
     "deleteSession": "Delete this session permanently",
     "activeSessionIndicator": "Recently active session (last 10 minutes)",
@@ -115,7 +117,8 @@
     "restoreProjectError": "Error restoring project. Please try again.",
     "restoreSessionFailed": "Failed to restore session. Please try again.",
     "restoreSessionError": "Error restoring session. Please try again.",
-    "forkSessionError": "Could not fork this session. Please try again."
+    "forkSessionError": "Could not fork this session. Please try again.",
+    "noStarredSessions": "No starred sessions"
   },
   "version": {
     "updateAvailable": "Update available",
@@ -124,6 +127,7 @@
   "search": {
     "modeProjects": "Projects",
     "modeConversations": "Conversations",
+    "starredOnlyTooltip": "Starred sessions only",
     "conversationsPlaceholder": "Search in conversations...",
     "searching": "Searching...",
     "sessionTitles": "Session",
