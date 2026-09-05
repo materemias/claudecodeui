@@ -49,6 +49,19 @@ type StarredSessionsApiPayload = {
   };
 };
 
+/** Describes whether a starred-session refresh updated state, became stale, or failed. */
+type StarredSessionsFetchResult =
+  | { kind: 'applied'; sessions: StarredSessionListItem[] }
+  | { kind: 'stale' }
+  | { kind: 'failed' };
+
+/** Records the latest starred-session refresh outcome for toggle settlement. */
+type StarredSessionsRefreshState = {
+  sequence: number;
+  kind: 'applied' | 'failed';
+};
+
+
 type UseSidebarControllerArgs = {
   projects: Project[];
   selectedProject: Project | null;
@@ -306,6 +319,9 @@ export function useSidebarController({
   // Only the newest starred-list request may replace the filter's source of
   // truth; mount, refresh, and toggle requests can overlap.
   const starredSessionsFetchSequenceRef = useRef(0);
+  // Lets a toggle that saw a stale fetch reconcile against the newest accepted list.
+  const latestStarredRefreshRef = useRef<StarredSessionsRefreshState | null>(null);
+
   const migrationStartedRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
 
@@ -439,7 +455,7 @@ export function useSidebarController({
     }
   }, []);
 
-  const fetchStarredSessions = useCallback(async (): Promise<StarredSessionListItem[] | null> => {
+  const fetchStarredSessions = useCallback(async (): Promise<StarredSessionsFetchResult> => {
     const requestSequence = ++starredSessionsFetchSequenceRef.current;
     setIsStarredSessionsLoading(true);
     setStarredSessionsError(false);
@@ -455,28 +471,61 @@ export function useSidebarController({
       }
 
       if (starredSessionsFetchSequenceRef.current !== requestSequence) {
-        return null;
+        return { kind: 'stale' };
       }
+      latestStarredRefreshRef.current = { sequence: requestSequence, kind: 'applied' };
+
+
+      // A completed refresh is authoritative for every session without an
+      // in-flight toggle. Preserve only desired states owned by queued writes.
+      const queuedSessionIds = new Set(sessionStarRequestQueueRef.current.keys());
+      for (const trackedSessionId of sessionStarStateRef.current.keys()) {
+        if (!queuedSessionIds.has(trackedSessionId)) {
+          sessionStarStateRef.current.delete(trackedSessionId);
+        }
+      }
+      // Accepted refreshes replace the optimistic overlay unless a serialized
+      // toggle still owns that session's desired state.
+      setOptimisticStarBySessionId((previous) => {
+        if (previous.size === 0) {
+          return previous;
+        }
+
+        const next = new Map(previous);
+        let changed = false;
+        for (const sessionId of previous.keys()) {
+          if (!queuedSessionIds.has(sessionId)) {
+            next.delete(sessionId);
+            changed = true;
+          }
+        }
+
+        return changed ? next : previous;
+      });
+
 
       setStarredSessions(payload.data.sessions);
       setStarredSessionsLoaded(true);
-      return payload.data.sessions;
+      return { kind: 'applied', sessions: payload.data.sessions };
     } catch (error) {
       if (starredSessionsFetchSequenceRef.current !== requestSequence) {
-        return null;
+        return { kind: 'stale' };
       }
+      latestStarredRefreshRef.current = { sequence: requestSequence, kind: 'failed' };
+
 
       // The previous list stays in place: a failed refetch must not empty the
       // filter out from under the user.
       setStarredSessionsError(true);
       console.error('[Sidebar] Failed to load starred sessions:', error);
-      return null;
+      return { kind: 'failed' };
     } finally {
       if (starredSessionsFetchSequenceRef.current === requestSequence) {
         setIsStarredSessionsLoading(false);
       }
     }
   }, []);
+
 
   const fetchRecentConversationsPage = useCallback(async (offset: number, append: boolean) => {
     const requestSequence = ++recentConversationsSeqRef.current;
@@ -627,26 +676,6 @@ export function useSidebarController({
     });
   }, [projects]);
 
-  useEffect(() => {
-    setOptimisticStarBySessionId((previous) => {
-      if (previous.size === 0) {
-        return previous;
-      }
-
-      const starredIds = new Set(starredSessions.map((session) => session.sessionId));
-      const next = new Map(previous);
-      let changed = false;
-
-      for (const [sessionId, optimisticValue] of previous.entries()) {
-        if (starredIds.has(sessionId) === optimisticValue) {
-          next.delete(sessionId);
-          changed = true;
-        }
-      }
-
-      return changed ? next : previous;
-    });
-  }, [starredSessions]);
 
   // Debounce search text updates so both project filtering and conversation
   // SSE requests avoid running on every keypress.
@@ -966,20 +995,42 @@ export function useSidebarController({
 
           // The list carries the metadata the filtered views graft onto projects,
           // so it is reread whenever a star lands.
-          await fetchStarredSessions();
+          const refreshResult = await fetchStarredSessions();
+          if (
+            refreshResult.kind === 'applied'
+            && sessionStarToggleSequenceRef.current.get(sessionId) === latestSequence
+          ) {
+            // The accepted list is authoritative now that this toggle's
+            // refresh completed; the request queue still gets cleaned up in
+            // the finally handler below.
+            sessionStarStateRef.current.delete(sessionId);
+            setOptimisticStarBySessionId((previous) => {
+              if (!previous.has(sessionId)) {
+                return previous;
+              }
+
+              const next = new Map(previous);
+              next.delete(sessionId);
+              return next;
+            });
+          }
         } catch (error) {
           const isLatestSequence = sessionStarToggleSequenceRef.current.get(sessionId) === latestSequence;
           if (!isLatestSequence) {
             return;
           }
 
-          const refreshedSessions = await fetchStarredSessions();
+          const refreshResult = await fetchStarredSessions();
           if (sessionStarToggleSequenceRef.current.get(sessionId) !== latestSequence) {
             return;
           }
 
-          if (refreshedSessions) {
-            const serverStarState = refreshedSessions.some((session) => session.sessionId === sessionId);
+          if (refreshResult.kind === 'stale') {
+            return;
+          }
+
+          if (refreshResult.kind === 'applied') {
+            const serverStarState = refreshResult.sessions.some((session) => session.sessionId === sessionId);
             sessionStarStateRef.current.set(sessionId, serverStarState);
             setOptimisticStarBySessionId((previous) => {
               const next = new Map(previous);
@@ -1002,7 +1053,27 @@ export function useSidebarController({
 
     let trackedRequest: Promise<void>;
     trackedRequest = updateStar.finally(() => {
-      if (sessionStarRequestQueueRef.current.get(sessionId) === trackedRequest) {
+      const isCurrentRequest = sessionStarRequestQueueRef.current.get(sessionId) === trackedRequest;
+      if (isCurrentRequest) {
+        const latestRefresh = latestStarredRefreshRef.current;
+        if (
+          sessionStarToggleSequenceRef.current.get(sessionId) === latestSequence
+          && latestRefresh?.kind === 'applied'
+          && latestRefresh.sequence === starredSessionsFetchSequenceRef.current
+        ) {
+          // The accepted list is authoritative once the owning request settles.
+          sessionStarStateRef.current.delete(sessionId);
+          setOptimisticStarBySessionId((previous) => {
+            if (!previous.has(sessionId)) {
+              return previous;
+            }
+
+            const next = new Map(previous);
+            next.delete(sessionId);
+            return next;
+          });
+        }
+
         sessionStarRequestQueueRef.current.delete(sessionId);
       }
     });
