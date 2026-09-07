@@ -5,15 +5,16 @@ import { api } from '@/shared/api';
 import type {
   ServerEvent,
   AppTab,
+  IsSessionProcessing,
   LLMProvider,
   LoadingProgress,
   Project,
   ProjectSession,
-  IsSessionProcessing,
   SessionUpsertedEvent,
 } from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
 import { readSelectedProvider } from '@/shared/selectedProvider';
+import { parseLLMProvider } from '@/shared/utils';
 
 type UseProjectsStateArgs = {
   sessionId?: string;
@@ -47,7 +48,9 @@ type SessionDetailsApiPayload = {
     provider?: string;
     summary?: string;
     createdAt?: string | null;
+    updatedAt?: string | null;
     lastActivity?: string | null;
+    isArchived?: boolean;
     isOneShot?: boolean;
     project?: {
       projectId?: string;
@@ -55,6 +58,7 @@ type SessionDetailsApiPayload = {
       fullPath?: string;
       displayName?: string;
       isStarred?: boolean;
+      isArchived?: boolean;
     } | null;
   };
 };
@@ -66,10 +70,7 @@ const DEFAULT_PROVIDER: LLMProvider = 'claude';
 const serialize = (value: unknown) => JSON.stringify(value ?? null);
 
 const getSessionProvider = (session: ProjectSession): LLMProvider => {
-  const provider = session.__provider ?? session.provider;
-  return typeof provider === 'string' && provider.trim()
-    ? provider as LLMProvider
-    : DEFAULT_PROVIDER;
+  return parseLLMProvider(session.__provider ?? session.provider) ?? DEFAULT_PROVIDER;
 };
 
 const normalizeSessionProvider = (session: ProjectSession): ProjectSession => ({
@@ -158,6 +159,23 @@ const filterOneShotSessions = (project: Project): Project => {
   };
 };
 
+/** Returns the next canonical page offset without counting individually hydrated running rows. */
+const getProjectSessionsOffset = (project: Project): number => {
+  const offset = project.sessionMeta?.nextOffset;
+  return typeof offset === 'number' && Number.isInteger(offset) && offset >= 0
+    ? offset
+    : countLoadedProjectSessions(project);
+};
+
+/** Tags a fresh project response with the cursor represented by its canonical session page. */
+const withProjectSessionsOffset = (project: Project): Project => ({
+  ...project,
+  sessions: project.sessions ?? [],
+  sessionMeta: {
+    ...project.sessionMeta,
+    nextOffset: countLoadedProjectSessions(project),
+  },
+});
 const mergeSessionProviderLists = (baseSessions: ProjectSession[], additionalSessions: ProjectSession[]): ProjectSession[] => {
   const merged = baseSessions.filter((session) => session.isOneShot !== true);
   const seenSessionIds = new Set(merged.map((session) => String(session.id)));
@@ -184,53 +202,74 @@ const mergeExpandedSessionPages = (previousProjects: Project[], incomingProjects
   }
 
   const previousByProjectId = new Map(previousProjects.map((project) => [project.projectId, project]));
-
-  return incomingProjects.map((incomingProject) => {
+  const mergedProjectIds = new Set<string>();
+  const mergedProjects = incomingProjects.map((incomingProject) => {
+    mergedProjectIds.add(incomingProject.projectId);
     const previousProject = previousByProjectId.get(incomingProject.projectId);
     if (!previousProject) {
       return incomingProject;
     }
 
-    const previousLoadedCount = countLoadedProjectSessions(previousProject);
-    const incomingLoadedCount = countLoadedProjectSessions(incomingProject);
-    if (previousLoadedCount <= incomingLoadedCount) {
-      return incomingProject;
-    }
+    const nextOffset = Math.max(
+      getProjectSessionsOffset(previousProject),
+      getProjectSessionsOffset(incomingProject),
+    );
+    const totalSessions = Number(
+      incomingProject.sessionMeta?.total
+      ?? previousProject.sessionMeta?.total
+      ?? nextOffset,
+    );
 
-    const mergedProject: Project = {
+    return {
       ...incomingProject,
       sessions: mergeSessionProviderLists(incomingProject.sessions ?? [], previousProject.sessions ?? []),
+      sessionMeta: {
+        ...incomingProject.sessionMeta,
+        total: totalSessions,
+        hasMore: Number.isFinite(totalSessions)
+          ? nextOffset < totalSessions
+          : Boolean(incomingProject.sessionMeta?.hasMore ?? previousProject.sessionMeta?.hasMore),
+        nextOffset,
+      },
     };
-
-    const totalSessions = Number(incomingProject.sessionMeta?.total ?? previousLoadedCount);
-    mergedProject.sessionMeta = {
-      ...incomingProject.sessionMeta,
-      total: totalSessions,
-      hasMore: countLoadedProjectSessions(mergedProject) < totalSessions,
-    };
-
-    return mergedProject;
   });
+
+  // Keep a project synthesized from a running row only until a canonical
+  // project response claims it. Normal projects absent from the response left
+  // the active source and must be dropped.
+  for (const previousProject of previousProjects) {
+    if (
+      !mergedProjectIds.has(previousProject.projectId)
+      && previousProject.__hydratedOnly === true
+    ) {
+      mergedProjects.push(previousProject);
+    }
+  }
+
+  return mergedProjects;
 };
 
 const mergeProjectSessionPage = (
   existingProject: Project,
   sessionsPage: ProjectSessionPage,
 ): Project => {
-  const mergedProject: Project = {
+  const pageSessions = sessionsPage.sessions ?? [];
+  const nextOffset = getProjectSessionsOffset(existingProject) + pageSessions.length;
+  const totalSessions = Number(sessionsPage.sessionMeta?.total ?? existingProject.sessionMeta?.total ?? nextOffset);
+
+  return {
     ...existingProject,
-    sessions: mergeSessionProviderLists(existingProject.sessions ?? [], sessionsPage.sessions ?? []),
+    sessions: mergeSessionProviderLists(existingProject.sessions ?? [], pageSessions),
+    sessionMeta: {
+      ...existingProject.sessionMeta,
+      ...sessionsPage.sessionMeta,
+      total: totalSessions,
+      hasMore: typeof sessionsPage.sessionMeta?.hasMore === 'boolean'
+        ? sessionsPage.sessionMeta.hasMore
+        : nextOffset < totalSessions,
+      nextOffset,
+    },
   };
-
-  const totalSessions = Number(sessionsPage.sessionMeta?.total ?? existingProject.sessionMeta?.total ?? 0);
-  mergedProject.sessionMeta = {
-    ...existingProject.sessionMeta,
-    ...sessionsPage.sessionMeta,
-    total: totalSessions,
-    hasMore: countLoadedProjectSessions(mergedProject) < totalSessions,
-  };
-
-  return mergedProject;
 };
 
 const getSessionAliasIds = (event: SessionUpsertedEvent): Set<string> => {
@@ -330,10 +369,12 @@ const upsertSessionIntoProject = (project: Project, event: SessionUpsertedEvent)
   const next: Project = { ...project, sessions: nextSessions };
   if (inserted) {
     const total = Number(project.sessionMeta?.total ?? 0) + 1;
+    const nextOffset = getProjectSessionsOffset(project) + 1;
     next.sessionMeta = {
       ...project.sessionMeta,
       total,
-      hasMore: countLoadedProjectSessions(next) < total,
+      hasMore: nextOffset < total,
+      nextOffset,
     };
   }
 
@@ -347,7 +388,11 @@ const projectFromRegistration = (project: Project): Project => ({
   displayName: project.displayName,
   isStarred: project.isStarred,
   sessions: project.sessions ?? [],
-  sessionMeta: project.sessionMeta ?? { hasMore: false, total: countLoadedProjectSessions(project) },
+  sessionMeta: project.sessionMeta ?? {
+    hasMore: false,
+    total: countLoadedProjectSessions(project),
+    nextOffset: countLoadedProjectSessions(project),
+  },
   taskmaster: project.taskmaster,
 });
 
@@ -364,10 +409,15 @@ const removeSessionFromProject = (project: Project, sessionIdToDelete: string): 
   };
 
   const totalSessions = Math.max(0, Number(project.sessionMeta?.total ?? 0) - 1);
+  const nextOffset = Math.max(
+    0,
+    Math.min(getProjectSessionsOffset(project) - 1, totalSessions),
+  );
   updatedProject.sessionMeta = {
     ...project.sessionMeta,
     total: totalSessions,
-    hasMore: countLoadedProjectSessions(updatedProject) < totalSessions,
+    hasMore: nextOffset < totalSessions,
+    nextOffset,
   };
 
   return updatedProject;
@@ -478,6 +528,12 @@ export function useProjectsState({
    * same payload — the workspace header and document title.
    */
   const projectsRequestIdRef = useRef(0);
+  /** Running-session detail lookups currently in flight, keyed by source session id. */
+  const hydratingSessionIdsRef = useRef(new Set<string>());
+  /** Successfully resolved source ids, including rows intentionally ignored as stale or archived. */
+  const resolvedRunningSessionIdsRef = useRef(new Set<string>());
+  /** Latest session-page request generation for each project. */
+  const projectSessionsRequestIdRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     sessionLookupRef.current = null;
@@ -531,7 +587,16 @@ export function useProjectsState({
         setIsLoadingProjects(true);
       }
       const response = await api.projects();
-      const projectData = ((await response.json()) as Project[]).map(filterOneShotSessions);
+      if (!response.ok) {
+        throw new Error(`Failed to load projects: ${response.status}`);
+      }
+      const payload: unknown = await response.json();
+      if (!Array.isArray(payload)) {
+        throw new Error('Failed to load projects: invalid response');
+      }
+      const projectData = (payload as Project[])
+        .map(withProjectSessionsOffset)
+        .map(filterOneShotSessions);
 
       if (projectsRequestIdRef.current !== requestId) {
         return;
@@ -568,6 +633,25 @@ export function useProjectsState({
         return refreshedProject
           ? mergeProjectSelectionMetadata(previousProject, refreshedProject)
           : previousProject;
+      });
+      setSelectedSession((previousSession) => {
+        if (!previousSession) {
+          return previousSession;
+        }
+
+        const refreshedSession = projectData
+          .flatMap((project) => project.sessions ?? [])
+          .find((session) => session.id === previousSession.id);
+        if (!refreshedSession) {
+          return previousSession;
+        }
+
+        const normalizedSession = refreshedSession.__provider || !previousSession.__provider
+          ? refreshedSession
+          : { ...refreshedSession, __provider: previousSession.__provider };
+        return serialize(normalizedSession) === serialize(previousSession)
+          ? previousSession
+          : normalizedSession;
       });
     } catch (error) {
       console.error('Error fetching projects:', error);
@@ -664,6 +748,131 @@ export function useProjectsState({
         ? { ...previousSession, ...optimisticSession }
         : optimisticSession
     ));
+  }, []);
+
+  const hydrateRunningSessions = useCallback(async (sourceSessionIds: ReadonlySet<string>) => {
+    const loadedSessionIds = new Set(
+      projectsRef.current.flatMap((project) =>
+        (project.sessions ?? []).map((session) => String(session.id)),
+      ),
+    );
+    const missingSessionIds = [...sourceSessionIds].filter(
+      (sourceSessionId) =>
+        !loadedSessionIds.has(sourceSessionId)
+        && !resolvedRunningSessionIdsRef.current.has(sourceSessionId)
+        && !hydratingSessionIdsRef.current.has(sourceSessionId),
+    );
+
+    for (const sourceSessionId of missingSessionIds) {
+      hydratingSessionIdsRef.current.add(sourceSessionId);
+    }
+
+    await Promise.all(missingSessionIds.map(async (sourceSessionId) => {
+      try {
+        const response = await api.sessionDetails(sourceSessionId);
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as SessionDetailsApiPayload;
+        const details = payload.data;
+        resolvedRunningSessionIdsRef.current.add(sourceSessionId);
+
+        const provider = parseLLMProvider(details?.provider);
+        const projectDetails = details?.project;
+        const sessionId = typeof details?.sessionId === 'string' ? details.sessionId.trim() : '';
+        const projectId = typeof projectDetails?.projectId === 'string'
+          ? projectDetails.projectId.trim()
+          : '';
+        const fullPath = typeof projectDetails?.fullPath === 'string' && projectDetails.fullPath.trim()
+          ? projectDetails.fullPath
+          : typeof projectDetails?.path === 'string'
+            ? projectDetails.path
+            : '';
+
+        if (
+          !details
+          || !provider
+          || !sessionId
+          || details.isArchived
+          || !projectDetails
+          || !projectId
+          || !fullPath
+          || projectDetails.isArchived
+        ) {
+          return;
+        }
+
+        const hydratedSession: ProjectSession = {
+          id: sessionId,
+          summary: typeof details.summary === 'string' ? details.summary : '',
+          createdAt: typeof details.createdAt === 'string' ? details.createdAt : undefined,
+          updated_at: typeof details.updatedAt === 'string' ? details.updatedAt : undefined,
+          lastActivity: typeof details.lastActivity === 'string' ? details.lastActivity : undefined,
+          provider,
+          __provider: provider,
+          __projectId: projectId,
+        };
+        if (typeof details.isOneShot === 'boolean') {
+          hydratedSession.isOneShot = details.isOneShot;
+        }
+
+        setProjects((previousProjects) => {
+          const existingProject = previousProjects.find(
+            (project) =>
+              project.projectId === projectId
+              && (project.sessions ?? []).some((session) => String(session.id) === sessionId),
+          );
+          if (existingProject) {
+            return previousProjects;
+          }
+
+          const projectsWithoutDuplicate = previousProjects.map((project) => {
+            const sessions = project.sessions ?? [];
+            if (!sessions.some((session) => String(session.id) === sessionId)) {
+              return project;
+            }
+            return {
+              ...project,
+              sessions: sessions.filter((session) => String(session.id) !== sessionId),
+            };
+          });
+          const projectIndex = projectsWithoutDuplicate.findIndex(
+            (project) => project.projectId === projectId,
+          );
+
+          if (projectIndex < 0) {
+            return [
+              {
+                projectId,
+                path: fullPath,
+                fullPath,
+                displayName: typeof projectDetails.displayName === 'string' && projectDetails.displayName
+                  ? projectDetails.displayName
+                  : fullPath,
+                isStarred: Boolean(projectDetails.isStarred),
+                sessions: [hydratedSession],
+                sessionMeta: { hasMore: true, nextOffset: 0 },
+                __hydratedOnly: true,
+              },
+              ...projectsWithoutDuplicate,
+            ];
+          }
+
+          const nextProjects = [...projectsWithoutDuplicate];
+          const project = projectsWithoutDuplicate[projectIndex];
+          nextProjects[projectIndex] = {
+            ...project,
+            sessions: [hydratedSession, ...(project.sessions ?? [])],
+          };
+          return nextProjects;
+        });
+      } catch (error) {
+        console.error(`Error resolving running session ${sourceSessionId}:`, error);
+      } finally {
+        hydratingSessionIdsRef.current.delete(sourceSessionId);
+      }
+    }));
   }, []);
 
   // Hydrates TaskMaster details for the given `projectId`. The project
@@ -1009,7 +1218,7 @@ export function useProjectsState({
             displayName: details.project?.displayName ?? '',
             isStarred: Boolean(details.project?.isStarred),
             sessions: [],
-            sessionMeta: { hasMore: false, total: 0 },
+            sessionMeta: { hasMore: false, total: 0, nextOffset: 0 },
           };
         });
       }
@@ -1019,10 +1228,7 @@ export function useProjectsState({
         summary: details.summary ?? '',
         createdAt: details.createdAt ?? undefined,
         lastActivity: details.lastActivity ?? undefined,
-        __provider:
-          typeof details.provider === 'string' && details.provider.trim()
-            ? (details.provider as LLMProvider)
-            : readSelectedProvider(),
+        __provider: parseLLMProvider(details.provider) ?? readSelectedProvider(),
         isOneShot: details.isOneShot === true,
         __projectId: resolvedProjectId,
       };
@@ -1106,71 +1312,25 @@ export function useProjectsState({
     [clearSessionAttention, navigate, selectedSession?.id],
   );
 
-  const handleSidebarRefresh = useCallback(async () => {
-    try {
-      const response = await api.projects();
-      const freshProjects = (await response.json()) as Project[];
-      const projectsWithTaskMaster = mergeTaskMasterCache(freshProjects, projects);
-      const mergedProjects = mergeExpandedSessionPages(projects, projectsWithTaskMaster);
-
-      setProjects((prevProjects) =>
-        projectsHaveChanges(prevProjects, mergedProjects) ? mergedProjects : prevProjects,
-      );
-
-      if (!selectedProject) {
-        return;
-      }
-
-      const refreshedProject = mergedProjects.find((project) => project.projectId === selectedProject.projectId);
-      if (!refreshedProject) {
-        return;
-      }
-
-      setSelectedProject((previousProject) => (
-        previousProject?.projectId === refreshedProject.projectId
-          ? mergeProjectSelectionMetadata(previousProject, refreshedProject)
-          : previousProject
-      ));
-
-      if (!selectedSession) {
-        return;
-      }
-
-      const refreshedSession = getProjectSessions(refreshedProject).find(
-        (session) => session.id === selectedSession.id,
-      );
-
-      if (refreshedSession) {
-        // Keep provider metadata stable when refreshed payload doesn't include __provider.
-        const normalizedRefreshedSession =
-          refreshedSession.__provider || !selectedSession.__provider
-            ? refreshedSession
-            : { ...refreshedSession, __provider: selectedSession.__provider };
-
-        if (serialize(normalizedRefreshedSession) !== serialize(selectedSession)) {
-          setSelectedSession(normalizedRefreshedSession);
-        }
-      }
-    } catch (error) {
-      console.error('Error refreshing sidebar:', error);
-    }
-  }, [projects, selectedProject, selectedSession]);
+  const handleSidebarRefresh = refreshProjectsSilently;
 
   const loadMoreProjectSessions = useCallback(async (projectId: string) => {
-    const project = projects.find((candidate) => candidate.projectId === projectId);
+    const project = projectsRef.current.find((candidate) => candidate.projectId === projectId);
     if (!project) {
       return;
     }
 
-    const loadedCount = countLoadedProjectSessions(project);
+    const offset = getProjectSessionsOffset(project);
     const totalCount = Number(project.sessionMeta?.total ?? 0);
-    if (totalCount > 0 && loadedCount >= totalCount) {
+    if (totalCount > 0 && offset >= totalCount) {
       return;
     }
 
+    const requestId = (projectSessionsRequestIdRef.current.get(projectId) ?? 0) + 1;
+    projectSessionsRequestIdRef.current.set(projectId, requestId);
     const response = await api.projectSessions(projectId, {
       limit: 20,
-      offset: loadedCount,
+      offset,
     });
 
     if (!response.ok) {
@@ -1185,18 +1345,59 @@ export function useProjectsState({
       throw new Error(message);
     }
 
-    const sessionsPage = (await response.json()) as ProjectSessionPage;
+    const payload: unknown = await response.json();
+    if (
+      typeof payload !== 'object'
+      || payload === null
+      || Array.isArray(payload)
+      || !('sessions' in payload)
+      || !Array.isArray(payload.sessions)
+      || payload.sessions.some(
+        (session) =>
+          typeof session !== 'object'
+          || session === null
+          || Array.isArray(session)
+          || !('id' in session)
+          || typeof session.id !== 'string'
+          || !session.id,
+      )
+      || !('sessionMeta' in payload)
+      || typeof payload.sessionMeta !== 'object'
+      || payload.sessionMeta === null
+      || Array.isArray(payload.sessionMeta)
+      || !('total' in payload.sessionMeta)
+      || typeof payload.sessionMeta.total !== 'number'
+      || !Number.isFinite(payload.sessionMeta.total)
+      || !('hasMore' in payload.sessionMeta)
+      || typeof payload.sessionMeta.hasMore !== 'boolean'
+    ) {
+      throw new Error(`Failed to load more sessions for project ${projectId}: invalid response`);
+    }
 
+    if (projectSessionsRequestIdRef.current.get(projectId) !== requestId) {
+      return;
+    }
+
+    const sessionsPage: ProjectSessionPage = {
+      sessions: payload.sessions as ProjectSession[],
+      sessionMeta: {
+        total: payload.sessionMeta.total,
+        hasMore: payload.sessionMeta.hasMore,
+      },
+    };
     setProjects((previousProjects) =>
       previousProjects.map((candidate) => {
-        if (candidate.projectId !== projectId) {
+        if (
+          candidate.projectId !== projectId
+          || projectSessionsRequestIdRef.current.get(projectId) !== requestId
+        ) {
           return candidate;
         }
 
         return mergeProjectSessionPage(candidate, sessionsPage);
       }),
     );
-  }, [projects]);
+  }, []);
 
   // `projectId` is the DB identifier passed from the sidebar's delete flow
   // after the migration away from folder-derived project names.
@@ -1224,6 +1425,7 @@ export function useProjectsState({
       onNewSession: handleNewSession,
       onSessionDelete: handleSessionDelete,
       onLoadMoreSessions: loadMoreProjectSessions,
+      onHydrateRunningSessions: hydrateRunningSessions,
       onProjectDelete: handleProjectDelete,
       isLoading: isLoadingProjects,
       loadingProgress,
@@ -1240,6 +1442,7 @@ export function useProjectsState({
       handleProjectDelete,
       handleProjectSelect,
       handleSessionDelete,
+      hydrateRunningSessions,
       loadMoreProjectSessions,
       handleSessionSelect,
       handleSidebarRefresh,
@@ -1273,6 +1476,7 @@ export function useProjectsState({
     fetchProjects,
     refreshProjectsSilently,
     registerOptimisticSession,
+    hydrateRunningSessions,
     sidebarSharedProps,
     handleProjectSelect,
     handleSessionSelect,
