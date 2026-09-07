@@ -239,6 +239,9 @@
     "forkFromHere": "여기서 분기"
   },
   "composer": {
+    "searchModels": "모델 검색…",
+    "noModelMatches": "“{{query}}”와 일치하는 모델이 없습니다",
+    "showMoreModels": "모델 더 보기",
     "editing": {
       "title": "이전 메시지를 교체하는 중",
       "filesNotReverted": "이미 변경된 파일은 되돌리지 않습니다",

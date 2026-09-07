@@ -59,6 +59,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsPermissionRequests: true,
     supportsTokenUsage: true,
     supportsEffort: true,
+    groupsModelsByProvider: false,
     // `resumeSessionAt` re-runs a conversation truncated at a message, and
     // `forkSession` copies a transcript prefix into a new session file.
     supportsMessageEditing: true,
@@ -74,6 +75,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsPermissionRequests: false,
     supportsTokenUsage: false,
     supportsEffort: false,
+    groupsModelsByProvider: false,
     supportsMessageEditing: false,
     supportsSessionForking: false,
   },
@@ -87,6 +89,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsPermissionRequests: false,
     supportsTokenUsage: true,
     supportsEffort: true,
+    groupsModelsByProvider: false,
     // Not from the Codex SDK, which only starts and resumes threads: both ride
     // the same CLI's `app-server` protocol, whose `thread/fork` copies a
     // thread up to a chosen turn. Editing is that fork plus a new prompt,
@@ -107,6 +110,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsPermissionRequests: false,
     supportsTokenUsage: true,
     supportsEffort: true,
+    groupsModelsByProvider: true,
     supportsMessageEditing: false,
     supportsSessionForking: false,
   },
