@@ -42,7 +42,9 @@
     "renameProject": "Projeyi yeniden adlandır (F2)",
     "deleteProject": "Projeyi kenar çubuğundan kaldır (Delete)",
     "addToFavorites": "Favorilere ekle",
+    "addSessionToFavorites": "Oturumu favorilere ekle",
     "removeFromFavorites": "Favorilerden çıkar",
+    "removeSessionFromFavorites": "Oturumu favorilerden çıkar",
     "editSessionName": "Oturum adını elle düzenle",
     "deleteSession": "Bu oturumu kalıcı olarak sil",
     "activeSessionIndicator": "Yakın zamanda etkin oturum (son 10 dakika)",
@@ -114,7 +116,8 @@
     "restoreProjectError": "Proje geri yüklenirken hata oluştu. Lütfen tekrar dene.",
     "restoreSessionFailed": "Oturum geri yüklenemedi. Lütfen tekrar dene.",
     "restoreSessionError": "Oturum geri yüklenirken hata oluştu. Lütfen tekrar dene.",
-    "forkSessionError": "Bu oturum çatallanamadı. Lütfen tekrar deneyin."
+    "forkSessionError": "Bu oturum çatallanamadı. Lütfen tekrar deneyin.",
+    "noStarredSessions": "Favori oturum yok"
   },
   "version": {
     "updateAvailable": "Güncelleme mevcut",
@@ -123,6 +126,7 @@
   "search": {
     "modeProjects": "Projeler",
     "modeConversations": "Konuşmalar",
+    "starredOnlyTooltip": "Sadece favori oturumlar",
     "conversationsPlaceholder": "Konuşmalarda ara...",
     "searching": "Aranıyor...",
     "sessionTitles": "Oturum başlıkları",

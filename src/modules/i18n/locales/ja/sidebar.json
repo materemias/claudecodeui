@@ -42,7 +42,9 @@
     "renameProject": "プロジェクト名を変更 (F2)",
     "deleteProject": "サイドバーからプロジェクトを除去 (Delete)",
     "addToFavorites": "お気に入りに追加",
+    "addSessionToFavorites": "セッションをお気に入りに追加",
     "removeFromFavorites": "お気に入りから削除",
+    "removeSessionFromFavorites": "セッションをお気に入りから削除",
     "editSessionName": "セッション名を手動で編集",
     "deleteSession": "このセッションを完全に削除",
     "activeSessionIndicator": "最近アクティブなセッション（過去10分以内）",
@@ -113,11 +115,15 @@
     "restoreProjectError": "プロジェクトの復元でエラーが発生しました。もう一度お試しください。",
     "restoreSessionFailed": "セッションの復元に失敗しました。もう一度お試しください。",
     "restoreSessionError": "セッションの復元でエラーが発生しました。もう一度お試しください。",
-    "forkSessionError": "このセッションを分岐できませんでした。もう一度お試しください。"
+    "forkSessionError": "このセッションを分岐できませんでした。もう一度お試しください。",
+    "noStarredSessions": "お気に入りのセッションはありません"
   },
   "version": {
     "updateAvailable": "アップデートあり",
     "restartRequired": "更新が適用されていません。サーバーを再起動してください"
+  },
+  "search": {
+    "starredOnlyTooltip": "お気に入りのセッションのみ"
   },
   "deleteConfirmation": {
     "deleteProject": "プロジェクトを除去",

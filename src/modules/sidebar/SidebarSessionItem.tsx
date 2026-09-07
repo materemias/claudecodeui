@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { Check, Copy, Edit2, GitBranch, Loader2, MoreHorizontal, Trash2, X } from 'lucide-react';
+import { Check, Copy, Edit2, GitBranch, Loader2, MoreHorizontal, Star, Trash2, X } from 'lucide-react';
+import type { SyntheticEvent } from 'react';
 import type { TFunction } from 'i18next';
 
 import { ActionMenu, Badge, Dialog, DialogContent, DialogTitle, LLMProviderLogo, Tooltip, buttonVariants } from '@/shared/ui';
@@ -30,6 +31,9 @@ type SidebarSessionItemProps = {
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   /** Branches this session into an independent one; absent when its provider cannot. */
   onForkSession?: (session: SessionWithProvider) => void;
+  /** Resolved for this row by the list, so starring one session does not invalidate the others. */
+  isStarred: boolean;
+  onToggleStarSession: (sessionId: string) => void;
   t: TFunction;
 };
 
@@ -61,6 +65,8 @@ function SidebarSessionItem({
   onSessionSelect,
   onDeleteSession,
   onForkSession,
+  isStarred,
+  onToggleStarSession,
   t,
 }: SidebarSessionItemProps) {
   const isCompact = useCompactSidebar();
@@ -123,6 +129,18 @@ function SidebarSessionItem({
   const requestDeleteSession = () => {
     onDeleteSession(session.id, sessionView.sessionName);
   };
+
+  // Starring must never select, open or rename the row it sits in, so the event
+  // is stopped before the surrounding link/row handlers ever see it.
+  const toggleStarSession = (event: SyntheticEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    onToggleStarSession(session.id);
+  };
+
+  const starLabel = isStarred
+    ? t('tooltips.removeSessionFromFavorites', 'Unstar session')
+    : t('tooltips.addSessionToFavorites', 'Star session');
 
   const loadProviderSessionId = async () => {
     const requestId = ++providerIdRequestRef.current;
@@ -250,6 +268,27 @@ function SidebarSessionItem({
           onClick={selectMobileSession}
         >
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-pressed={isStarred}
+              aria-label={starLabel}
+              title={starLabel}
+              className={cn(
+                'h-8 w-8 rounded-md flex items-center justify-center flex-shrink-0 active:scale-90 transition-all duration-150',
+                isStarred ? 'bg-yellow-500/10 dark:bg-yellow-900/30' : 'bg-muted/50',
+              )}
+              onClick={toggleStarSession}
+            >
+              <Star
+                className={cn(
+                  'w-4 h-4 transition-colors',
+                  isStarred
+                    ? 'text-yellow-600 dark:text-yellow-400 fill-current'
+                    : 'text-muted-foreground',
+                )}
+              />
+            </button>
+
             <div
               className={cn(
                 'w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0',
@@ -457,6 +496,35 @@ function SidebarSessionItem({
           }}
         >
           <div className="flex w-full min-w-0 items-center gap-2">
+            <div
+              role="button"
+              tabIndex={0}
+              aria-pressed={isStarred}
+              aria-label={starLabel}
+              title={starLabel}
+              className={cn(
+                'w-6 h-6 flex flex-shrink-0 items-center justify-center rounded cursor-pointer transition-all duration-200',
+                isStarred
+                  ? 'hover:bg-yellow-50 dark:hover:bg-yellow-900/20'
+                  : 'opacity-40 hover:opacity-100 hover:bg-accent',
+              )}
+              onClick={toggleStarSession}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') {
+                  return;
+                }
+                toggleStarSession(event);
+              }}
+            >
+              <Star
+                className={cn(
+                  'w-3 h-3 transition-colors',
+                  isStarred
+                    ? 'text-yellow-600 dark:text-yellow-400 fill-current'
+                    : 'text-muted-foreground',
+                )}
+              />
+            </div>
             <div
               className={cn(
                 'flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md',

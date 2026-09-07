@@ -1,5 +1,5 @@
-import { ChevronRight, MessageSquare } from 'lucide-react';
-import type { MouseEvent } from 'react';
+import { ChevronRight, MessageSquare, Star } from 'lucide-react';
+import type { MouseEvent, SyntheticEvent } from 'react';
 import type { TFunction } from 'i18next';
 
 import { Button, LLMProviderLogo } from '@/shared/ui';
@@ -21,6 +21,9 @@ type SidebarRecentConversationsProps = {
     sessionId: string,
     provider: string,
   ) => void;
+  /** Star state stays a lookup so toggling one conversation does not re-resolve the others. */
+  isSessionStarred: (sessionId: string) => boolean;
+  onToggleStarSession: (sessionId: string) => void;
   onLoadMore: () => void;
   onRetry: () => void;
   t: TFunction;
@@ -53,6 +56,8 @@ export default function SidebarRecentConversations({
   selectedSession,
   currentTime,
   onConversationSelect,
+  isSessionStarred,
+  onToggleStarSession,
   onLoadMore,
   onRetry,
   t,
@@ -102,6 +107,10 @@ export default function SidebarRecentConversations({
         {conversations.map((conversation) => {
           const isSelected = String(selectedSession?.id ?? '') === conversation.sessionId;
           const age = formatCompactAge(conversation.lastActivity, currentTime);
+          const isStarred = isSessionStarred(conversation.sessionId);
+          const starLabel = isStarred
+            ? t('tooltips.removeSessionFromFavorites', 'Unstar session')
+            : t('tooltips.addSessionToFavorites', 'Star session');
 
           const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
             if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
@@ -113,6 +122,13 @@ export default function SidebarRecentConversations({
               conversation.sessionId,
               conversation.provider,
             );
+          };
+
+          // Starring must not navigate to the conversation the control sits in.
+          const handleToggleStar = (event: SyntheticEvent) => {
+            event.stopPropagation();
+            event.preventDefault();
+            onToggleStarSession(conversation.sessionId);
           };
 
           return (
@@ -128,6 +144,36 @@ export default function SidebarRecentConversations({
                   : 'text-foreground hover:bg-accent/60',
               )}
             >
+              <span
+                role="button"
+                tabIndex={0}
+                aria-pressed={isStarred}
+                aria-label={starLabel}
+                title={starLabel}
+                className={cn(
+                  'flex h-6 w-6 flex-shrink-0 cursor-pointer items-center justify-center rounded transition-all duration-200',
+                  isStarred
+                    ? 'hover:bg-yellow-50 dark:hover:bg-yellow-900/20'
+                    : 'opacity-40 hover:opacity-100 hover:bg-accent',
+                )}
+                onClick={handleToggleStar}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') {
+                    return;
+                  }
+                  handleToggleStar(event);
+                }}
+              >
+                <Star
+                  className={cn(
+                    'h-3 w-3 transition-colors',
+                    isStarred
+                      ? 'fill-current text-yellow-600 dark:text-yellow-400'
+                      : 'text-muted-foreground',
+                  )}
+                />
+              </span>
+
               <span className={cn(
                 'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md',
                 isSelected ? 'bg-primary/10' : 'bg-muted/60',

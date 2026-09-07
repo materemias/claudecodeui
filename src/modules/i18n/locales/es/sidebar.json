@@ -42,7 +42,9 @@
     "renameProject": "Renombrar proyecto (F2)",
     "deleteProject": "Quitar proyecto de la barra lateral (Supr)",
     "addToFavorites": "Añadir a favoritos",
+    "addSessionToFavorites": "Añadir sesión a favoritos",
     "removeFromFavorites": "Quitar de favoritos",
+    "removeSessionFromFavorites": "Quitar sesión de favoritos",
     "editSessionName": "Editar manualmente el nombre de la sesión",
     "deleteSession": "Eliminar esta sesión de forma permanente",
     "activeSessionIndicator": "Sesión activa recientemente (últimos 10 minutos)",
@@ -114,7 +116,8 @@
     "restoreProjectError": "Error al restaurar el proyecto. Inténtalo de nuevo.",
     "restoreSessionFailed": "No se pudo restaurar la sesión. Inténtalo de nuevo.",
     "restoreSessionError": "Error al restaurar la sesión. Inténtalo de nuevo.",
-    "forkSessionError": "No se pudo bifurcar esta sesión. Inténtalo de nuevo."
+    "forkSessionError": "No se pudo bifurcar esta sesión. Inténtalo de nuevo.",
+    "noStarredSessions": "No hay sesiones favoritas"
   },
   "version": {
     "updateAvailable": "Actualización disponible",
@@ -123,6 +126,7 @@
   "search": {
     "modeProjects": "Proyectos",
     "modeConversations": "Conversaciones",
+    "starredOnlyTooltip": "Solo sesiones favoritas",
     "conversationsPlaceholder": "Buscar en conversaciones...",
     "searching": "Buscando...",
     "sessionTitles": "Títulos de sesiones",

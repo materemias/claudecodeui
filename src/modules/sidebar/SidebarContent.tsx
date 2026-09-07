@@ -1,8 +1,9 @@
 import { type ReactNode } from 'react';
-import { Activity, Archive, Folder, MessageSquare, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { Activity, Archive, Folder, MessageSquare, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { LLMProviderLogo, ScrollArea } from '@/shared/ui';
+import { cn } from '@/shared/utils';
 import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationSearchResults, Project, RecentConversationListItem, ReleaseInfo, SearchProgress, SidebarProjectListProps, SidebarSearchMode } from '@/shared/types';
 import { formatCompactAge, getAllSessions } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import SidebarFooter from '@/modules/sidebar/SidebarFooter';
@@ -31,6 +32,58 @@ function HighlightedSnippet({ snippet, highlights }: { snippet: string; highligh
     <span className="min-w-0 flex-1 break-words text-xs leading-relaxed text-muted-foreground">
       {parts}
     </span>
+  );
+}
+
+/**
+ * The star toggle for the session rows SidebarContent renders itself.
+ *
+ * Every one of those rows opens a session on click, so the toggle has to swallow
+ * the event before the row acts on it.
+ */
+function SessionStarButton({
+  sessionId,
+  sessionTitle,
+  isStarred,
+  onToggle,
+  t,
+}: {
+  sessionId: string;
+  sessionTitle: string;
+  isStarred: boolean;
+  onToggle: (sessionId: string) => void;
+  t: TFunction;
+}) {
+  const label = isStarred
+    ? t('tooltips.removeSessionFromFavorites', 'Unstar session')
+    : t('tooltips.addSessionToFavorites', 'Star session');
+
+  return (
+    <button
+      type="button"
+      className={cn(
+        'flex h-6 w-6 flex-shrink-0 items-center justify-center rounded transition-all duration-200',
+        isStarred
+          ? 'hover:bg-yellow-50 dark:hover:bg-yellow-900/20'
+          : 'opacity-40 hover:bg-accent hover:opacity-100',
+      )}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onToggle(sessionId);
+      }}
+      title={label}
+      aria-label={`${label}: ${sessionTitle}`}
+    >
+      <Star
+        className={cn(
+          'h-3 w-3 transition-colors',
+          isStarred
+            ? 'fill-current text-yellow-600 dark:text-yellow-400'
+            : 'text-muted-foreground',
+        )}
+      />
+    </button>
   );
 }
 
@@ -102,6 +155,13 @@ type SidebarContentProps = {
   onClearSearchFilter: () => void;
   searchMode: SidebarSearchMode;
   onSearchModeChange: (mode: SidebarSearchMode) => void;
+  isStarredSessionsOnly: boolean;
+  isStarredSessionsLoading: boolean;
+  starredSessionsError: boolean;
+  starredSessionsLoaded: boolean;
+  onToggleStarredSessionsOnly: () => void;
+  isSessionStarred: (sessionId: string) => boolean;
+  onToggleStarSession: (sessionId: string) => void;
   conversationResults: ConversationSearchResults | null;
   isSearching: boolean;
   searchProgress: SearchProgress | null;
@@ -151,6 +211,13 @@ export default function SidebarContent({
   onClearSearchFilter,
   searchMode,
   onSearchModeChange,
+  isStarredSessionsOnly,
+  isStarredSessionsLoading,
+  starredSessionsError,
+  starredSessionsLoaded,
+  onToggleStarredSessionsOnly,
+  isSessionStarred,
+  onToggleStarSession,
   conversationResults,
   isSearching,
   searchProgress,
@@ -202,6 +269,8 @@ export default function SidebarContent({
         onClearSearchFilter={onClearSearchFilter}
         searchMode={searchMode}
         onSearchModeChange={onSearchModeChange}
+        isStarredSessionsOnly={isStarredSessionsOnly}
+        onToggleStarredSessionsOnly={onToggleStarredSessionsOnly}
         onRefresh={onRefresh}
         isRefreshing={isRefreshing}
         onCreateProject={onCreateProject}
@@ -210,7 +279,34 @@ export default function SidebarContent({
       />
 
       <ScrollArea className="flex-1 overflow-y-auto overscroll-contain md:px-1.5 md:py-2">
-        {showConversationSearch ? (
+        {isStarredSessionsOnly && !starredSessionsLoaded && starredSessionsError ? (
+          <div className="px-4 py-12 text-center md:py-8">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-muted md:mb-3">
+              <Star className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <h3 className="mb-2 text-base font-medium text-foreground">
+              {t('messages.loadStarredSessionsError', 'Unable to load starred sessions')}
+            </h3>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+              onClick={onRefresh}
+              disabled={isRefreshing}
+            >
+              <RotateCcw className="h-3 w-3" />
+              {t('messages.retry', 'Retry')}
+            </button>
+          </div>
+        ) : isStarredSessionsOnly && !starredSessionsLoaded && isStarredSessionsLoading ? (
+          <div className="px-4 py-12 text-center md:py-8">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-muted md:mb-3">
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t('messages.loadingStarredSessions', 'Loading starred sessions...')}
+            </p>
+          </div>
+        ) : showConversationSearch ? (
           isSearching && !conversationResults ? (
             <div className="px-4 py-12 text-center md:py-8">
               <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-muted md:mb-3">
@@ -228,7 +324,11 @@ export default function SidebarContent({
               <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-muted md:mb-3">
                 <Search className="h-6 w-6 text-muted-foreground" />
               </div>
-              <h3 className="mb-2 text-base font-medium text-foreground md:mb-1">{t('search.noResults')}</h3>
+              <h3 className="mb-2 text-base font-medium text-foreground md:mb-1">
+                {isStarredSessionsOnly
+                  ? t('messages.noStarredSessions', 'No starred sessions')
+                  : t('search.noResults')}
+              </h3>
               <p className="text-sm text-muted-foreground">{t('search.tryDifferentQuery')}</p>
             </div>
           ) : conversationResults && (hasSearchResults || isSearching) ? (
@@ -251,36 +351,47 @@ export default function SidebarContent({
                     const age = formatCompactAge(session.lastActivity, projectListProps.currentTime);
 
                     return (
-                      <button
+                      <div
                         key={`${session.provider}-${session.sessionId}`}
-                        type="button"
-                        className="group flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent/60"
-                        onClick={() => onConversationResultClick(
-                          session.projectId,
-                          session.sessionId,
-                          session.provider,
-                        )}
+                        className="group flex w-full min-w-0 items-center gap-1 rounded-lg pr-1 transition-colors hover:bg-accent/60"
                       >
-                        <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-muted/60">
-                          <LLMProviderLogo provider={session.provider} className="h-3.5 w-3.5" />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[13px] font-normal leading-4 text-foreground">
-                            {session.sessionTitle}
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-2 text-left"
+                          onClick={() => onConversationResultClick(
+                            session.projectId,
+                            session.sessionId,
+                            session.provider,
+                          )}
+                        >
+                          <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-muted/60">
+                            <LLMProviderLogo provider={session.provider} className="h-3.5 w-3.5" />
                           </span>
-                          <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] leading-3 text-muted-foreground">
-                            <span className="truncate">{session.projectDisplayName}</span>
-                            {age && (
-                              <>
-                                <span className="flex-shrink-0 text-muted-foreground/40">·</span>
-                                <time className="flex-shrink-0 tabular-nums" dateTime={session.lastActivity ?? undefined}>
-                                  {age}
-                                </time>
-                              </>
-                            )}
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[13px] font-normal leading-4 text-foreground">
+                              {session.sessionTitle}
+                            </span>
+                            <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] leading-3 text-muted-foreground">
+                              <span className="truncate">{session.projectDisplayName}</span>
+                              {age && (
+                                <>
+                                  <span className="flex-shrink-0 text-muted-foreground/40">·</span>
+                                  <time className="flex-shrink-0 tabular-nums" dateTime={session.lastActivity ?? undefined}>
+                                    {age}
+                                  </time>
+                                </>
+                              )}
+                            </span>
                           </span>
-                        </span>
-                      </button>
+                        </button>
+                        <SessionStarButton
+                          sessionId={session.sessionId}
+                          sessionTitle={session.sessionTitle}
+                          isStarred={isSessionStarred(session.sessionId)}
+                          onToggle={onToggleStarSession}
+                          t={t}
+                        />
+                      </div>
                     );
                   })}
                 </section>
@@ -330,44 +441,57 @@ export default function SidebarContent({
                         </span>
                       </div>
                       {projectResult.sessions.map((session) => (
-                        <button
+                        <div
                           key={`${projectResult.projectId ?? projectResult.projectName}-${session.sessionId}`}
-                          className="w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/50"
-                          onClick={() => onConversationResultClick(
-                            // Pass the DB projectId (preferred) so the parent can
-                            // cross-reference with the loaded projects list.
-                            projectResult.projectId,
-                            session.sessionId,
-                            session.provider || session.matches[0]?.provider || 'claude',
-                            session.matches[0]?.timestamp,
-                            session.matches[0]?.snippet
-                          )}
+                          className="flex items-start gap-1 rounded-md pr-1 transition-colors hover:bg-accent/50"
                         >
-                          <div className="mb-1 flex items-center gap-1.5">
-                            <MessageSquare className="h-3 w-3 flex-shrink-0 text-primary" />
-                            <span className="truncate text-xs font-normal text-foreground">
-                              {session.sessionSummary}
-                            </span>
-                            {session.provider && session.provider !== 'claude' && (
-                              <span className="flex-shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] uppercase text-muted-foreground">
-                                {session.provider}
-                              </span>
+                          <button
+                            className="min-w-0 flex-1 rounded-md px-2 py-2 text-left"
+                            onClick={() => onConversationResultClick(
+                              // Pass the DB projectId (preferred) so the parent can
+                              // cross-reference with the loaded projects list.
+                              projectResult.projectId,
+                              session.sessionId,
+                              session.provider || session.matches[0]?.provider || 'claude',
+                              session.matches[0]?.timestamp,
+                              session.matches[0]?.snippet
                             )}
-                          </div>
-                          <div className="space-y-1 pl-4">
-                            {session.matches.map((match, idx) => (
-                              <div key={idx} className="flex items-start gap-1">
-                                <span className="mt-0.5 flex-shrink-0 text-[10px] font-normal uppercase text-muted-foreground/60">
-                                  {match.role === 'user' ? 'U' : 'A'}
+                          >
+                            <div className="mb-1 flex items-center gap-1.5">
+                              <MessageSquare className="h-3 w-3 flex-shrink-0 text-primary" />
+                              <span className="truncate text-xs font-normal text-foreground">
+                                {session.sessionSummary}
+                              </span>
+                              {session.provider && session.provider !== 'claude' && (
+                                <span className="flex-shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] uppercase text-muted-foreground">
+                                  {session.provider}
                                 </span>
-                                <HighlightedSnippet
-                                  snippet={match.snippet}
-                                  highlights={match.highlights}
-                                />
-                              </div>
-                            ))}
+                              )}
+                            </div>
+                            <div className="space-y-1 pl-4">
+                              {session.matches.map((match, idx) => (
+                                <div key={idx} className="flex items-start gap-1">
+                                  <span className="mt-0.5 flex-shrink-0 text-[10px] font-normal uppercase text-muted-foreground/60">
+                                    {match.role === 'user' ? 'U' : 'A'}
+                                  </span>
+                                  <HighlightedSnippet
+                                    snippet={match.snippet}
+                                    highlights={match.highlights}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </button>
+                          <div className="pt-2">
+                            <SessionStarButton
+                              sessionId={session.sessionId}
+                              sessionTitle={session.sessionSummary}
+                              isStarred={isSessionStarred(session.sessionId)}
+                              onToggle={onToggleStarSession}
+                              t={t}
+                            />
                           </div>
-                        </button>
+                        </div>
                       ))}
                     </div>
                   ))}
@@ -376,20 +500,31 @@ export default function SidebarContent({
             </div>
           ) : null
         ) : searchMode === 'conversations' ? (
-          <SidebarRecentConversations
-            conversations={recentConversations}
-            total={recentConversationsTotal}
-            hasMore={recentConversationsHasMore}
-            isLoading={isRecentConversationsLoading}
-            isLoadingMore={isLoadingMoreRecentConversations}
-            hasError={recentConversationsError}
-            selectedSession={projectListProps.selectedSession}
-            currentTime={projectListProps.currentTime}
-            onConversationSelect={onConversationResultClick}
-            onLoadMore={onLoadMoreRecentConversations}
-            onRetry={onRetryRecentConversations}
-            t={t}
-          />
+          isStarredSessionsOnly && recentConversations.length === 0 ? (
+            <div className="px-4 py-10 text-center">
+              <Star className="mx-auto mb-3 h-6 w-6 text-muted-foreground" />
+              <p className="text-sm font-medium text-foreground">
+                {t('messages.noStarredSessions', 'No starred sessions')}
+              </p>
+            </div>
+          ) : (
+            <SidebarRecentConversations
+              conversations={recentConversations}
+              total={recentConversationsTotal}
+              hasMore={recentConversationsHasMore}
+              isLoading={isRecentConversationsLoading}
+              isLoadingMore={isLoadingMoreRecentConversations}
+              hasError={recentConversationsError}
+              selectedSession={projectListProps.selectedSession}
+              currentTime={projectListProps.currentTime}
+              isSessionStarred={isSessionStarred}
+              onToggleStarSession={onToggleStarSession}
+              onConversationSelect={onConversationResultClick}
+              onLoadMore={onLoadMoreRecentConversations}
+              onRetry={onRetryRecentConversations}
+              t={t}
+            />
+          )
         ) : searchMode === 'running' ? (
           projectListProps.filteredProjects.length === 0 ? (
             <div className="px-4 py-12 text-center md:py-8">
@@ -397,7 +532,9 @@ export default function SidebarContent({
                 <Activity className="h-6 w-6 text-muted-foreground" />
               </div>
               <h3 className="mb-2 text-base font-medium text-foreground md:mb-1">
-                {t('running.emptyTitle', 'No sessions running')}
+                {isStarredSessionsOnly
+                  ? t('messages.noStarredSessions', 'No starred sessions')
+                  : t('running.emptyTitle', 'No sessions running')}
               </h3>
               <p className="text-sm text-muted-foreground">
                 {runningSessionsCount > 0
@@ -443,9 +580,11 @@ export default function SidebarContent({
                   <Archive className="h-[18px] w-[18px] text-muted-foreground" />
                 </div>
                 <h3 className="text-sm font-medium text-foreground">
-                  {archivedSessionsCount > 0
-                    ? t('archived.noMatchingSessions', 'No matching archived items')
-                    : t('archived.emptyTitle', 'No archived items')}
+                  {isStarredSessionsOnly
+                    ? t('messages.noStarredSessions', 'No starred sessions')
+                    : archivedSessionsCount > 0
+                      ? t('archived.noMatchingSessions', 'No matching archived items')
+                      : t('archived.emptyTitle', 'No archived items')}
                 </h3>
                 <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
                   {archivedSessionsCount > 0
@@ -520,65 +659,68 @@ export default function SidebarContent({
                     </div>
                     {projectSessions.length > 0 && (
                       <div className="border-t border-border/45 bg-muted/[0.08]">
-                        {projectSessions.map((session) => (
-                          <button
-                            key={String(session.id)}
-                            className="flex w-full items-center gap-2.5 border-b border-border/35 px-2.5 py-2 text-left transition-colors last:border-b-0 hover:bg-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                            onClick={() => onArchivedSessionClick({
-                              sessionId: String(session.id),
-                              provider: session.__provider,
-                              projectId: project.projectId,
-                              projectPath: project.fullPath,
-                              projectDisplayName: project.displayName,
-                              sessionTitle:
-                                (typeof session.summary === 'string' && session.summary.trim().length > 0
-                                  ? session.summary
-                                  : typeof session.name === 'string' && session.name.trim().length > 0
-                                    ? session.name
-                                    : String(session.id)),
-                              createdAt: typeof session.created_at === 'string' ? session.created_at : null,
-                              updatedAt: typeof session.updated_at === 'string' ? session.updated_at : null,
-                              lastActivity:
-                                typeof session.lastActivity === 'string'
-                                  ? session.lastActivity
-                                  : typeof session.updated_at === 'string'
-                                    ? session.updated_at
-                                    : typeof session.created_at === 'string'
-                                      ? session.created_at
-                                      : null,
-                              isProjectArchived: true,
-                            })}
-                          >
-                            <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-background/70">
-                              <LLMProviderLogo provider={session.__provider} className="h-3.5 w-3.5" />
-                            </span>
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-xs text-foreground">
-                                {(typeof session.summary === 'string' && session.summary.trim().length > 0
-                                  ? session.summary
-                                  : typeof session.name === 'string' && session.name.trim().length > 0
-                                    ? session.name
-                                    : String(session.id))}
-                              </p>
-                              <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/70">
-                                <span className="uppercase tracking-wide">{session.__provider}</span>
-                                <span aria-hidden>·</span>
-                                <span className="tabular-nums">
-                                  {formatCompactAge(
-                                    typeof session.lastActivity === 'string'
-                                      ? session.lastActivity
-                                      : typeof session.updated_at === 'string'
-                                        ? session.updated_at
-                                        : typeof session.created_at === 'string'
-                                          ? session.created_at
-                                          : null,
-                                    projectListProps.currentTime,
-                                  )}
+                        {projectSessions.map((session) => {
+                          const sessionTitle =
+                            typeof session.summary === 'string' && session.summary.trim().length > 0
+                              ? session.summary
+                              : typeof session.name === 'string' && session.name.trim().length > 0
+                                ? session.name
+                                : String(session.id);
+                          const sessionActivity =
+                            typeof session.lastActivity === 'string'
+                              ? session.lastActivity
+                              : typeof session.updated_at === 'string'
+                                ? session.updated_at
+                                : typeof session.created_at === 'string'
+                                  ? session.created_at
+                                  : null;
+
+                          return (
+                            <div
+                              key={String(session.id)}
+                              className="flex items-center gap-1 border-b border-border/35 px-2.5 py-2 transition-colors last:border-b-0 hover:bg-accent/35"
+                            >
+                              <button
+                                className="flex min-w-0 flex-1 items-center gap-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                onClick={() => onArchivedSessionClick({
+                                  sessionId: String(session.id),
+                                  provider: session.__provider,
+                                  projectId: project.projectId,
+                                  projectPath: project.fullPath,
+                                  projectDisplayName: project.displayName,
+                                  sessionTitle,
+                                  createdAt: typeof session.created_at === 'string' ? session.created_at : null,
+                                  updatedAt: typeof session.updated_at === 'string' ? session.updated_at : null,
+                                  lastActivity: sessionActivity,
+                                  isProjectArchived: true,
+                                })}
+                              >
+                                <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-background/70">
+                                  <LLMProviderLogo provider={session.__provider} className="h-3.5 w-3.5" />
                                 </span>
-                              </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-xs text-foreground">
+                                    {sessionTitle}
+                                  </p>
+                                  <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/70">
+                                    <span className="uppercase tracking-wide">{session.__provider}</span>
+                                    <span aria-hidden>·</span>
+                                    <span className="tabular-nums">
+                                      {formatCompactAge(sessionActivity, projectListProps.currentTime)}
+                                    </span>
+                                  </div>
+                                </div>
+                              </button>
+                              <SessionStarButton
+                                sessionId={String(session.id)}
+                                sessionTitle={sessionTitle}
+                                isStarred={isSessionStarred(String(session.id))}
+                                onToggle={onToggleStarSession}
+                                t={t}
+                              />
                             </div>
-                          </button>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </section>
@@ -640,6 +782,13 @@ export default function SidebarContent({
                           </div>
                         </button>
                         <div className="flex flex-shrink-0 items-center gap-0.5">
+                          <SessionStarButton
+                            sessionId={session.sessionId}
+                            sessionTitle={session.sessionTitle}
+                            isStarred={isSessionStarred(session.sessionId)}
+                            onToggle={onToggleStarSession}
+                            t={t}
+                          />
                           <button
                             className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-emerald-500/10 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40 dark:hover:text-emerald-300"
                             onClick={() => onRestoreArchivedSession(session.sessionId)}
@@ -664,6 +813,18 @@ export default function SidebarContent({
               ))}
             </div>
           )
+        ) : isStarredSessionsOnly
+          && !isLoading
+          && projects.length > 0
+          && projectListProps.filteredProjects.length === 0 ? (
+          <div className="px-4 py-12 text-center md:py-8">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg border border-border/70 bg-muted/50 md:mb-3">
+              <Star className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <h3 className="text-base font-medium text-foreground">
+              {t('messages.noStarredSessions', 'No starred sessions')}
+            </h3>
+          </div>
         ) : (
           <SidebarProjectList {...projectListProps} />
         )}

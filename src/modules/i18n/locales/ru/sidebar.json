@@ -42,7 +42,9 @@
     "renameProject": "Переименовать проект (F2)",
     "deleteProject": "Убрать проект из боковой панели (Delete)",
     "addToFavorites": "Добавить в избранное",
+    "addSessionToFavorites": "Добавить сеанс в избранное",
     "removeFromFavorites": "Удалить из избранного",
+    "removeSessionFromFavorites": "Удалить сеанс из избранного",
     "editSessionName": "Вручную редактировать имя сеанса",
     "deleteSession": "Удалить этот сеанс навсегда",
     "activeSessionIndicator": "Недавно активный сеанс (последние 10 минут)",
@@ -114,7 +116,8 @@
     "restoreProjectError": "Ошибка при восстановлении проекта. Попробуйте снова.",
     "restoreSessionFailed": "Не удалось восстановить сеанс. Попробуйте снова.",
     "restoreSessionError": "Ошибка при восстановлении сеанса. Попробуйте снова.",
-    "forkSessionError": "Не удалось создать ветку сессии. Попробуйте ещё раз."
+    "forkSessionError": "Не удалось создать ветку сессии. Попробуйте ещё раз.",
+    "noStarredSessions": "Нет избранных сеансов"
   },
   "version": {
     "updateAvailable": "Доступно обновление",
@@ -123,6 +126,7 @@
   "search": {
     "modeProjects": "Проекты",
     "modeConversations": "Разговоры",
+    "starredOnlyTooltip": "Только избранные сеансы",
     "conversationsPlaceholder": "Поиск в разговорах...",
     "searching": "Поиск...",
     "sessionTitles": "Названия сеансов",

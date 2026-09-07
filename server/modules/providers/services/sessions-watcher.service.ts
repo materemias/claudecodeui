@@ -5,8 +5,9 @@ import { promises as fsPromises } from 'node:fs';
 import chokidar, { type FSWatcher } from 'chokidar';
 
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
-import { broadcastSessionUpsertedBatch } from '@/modules/websocket/index.js';
-import type { LLMProvider } from '@/shared/types.js';
+import { getOmpSessionPinsPath } from '@/modules/providers/list/omp/omp-session-pins.js';
+import { broadcastSessionUpsertedBatch, connectedClients, WS_OPEN_STATE } from '@/modules/websocket/index.js';
+import type { GatewayEventKind, LLMProvider } from '@/shared/types.js';
 
 type WatcherEventType = 'add' | 'change';
 
@@ -195,11 +196,55 @@ async function onUpdate(
   }
 }
 
+function broadcastSessionStarsChanged(): void {
+  const kind: GatewayEventKind = 'session_stars_changed';
+  const payload = JSON.stringify({ kind });
+  for (const client of connectedClients) {
+    if (client.readyState !== WS_OPEN_STATE) {
+      continue;
+    }
+    try {
+      client.send(payload);
+    } catch (error) {
+      console.warn('Session stars invalidation send failed for one websocket client', error);
+    }
+  }
+}
+
+async function initializeOmpPinsWatcher(): Promise<void> {
+  const pinsPath = getOmpSessionPinsPath();
+  try {
+    // Chokidar cannot follow a missing file through missing ancestor folders.
+    await fsPromises.mkdir(path.dirname(pinsPath), { recursive: true });
+    // Watch the file even before it exists. Chokidar follows its creation and
+    // atomic replacements; pins never enter the transcript synchronization path.
+    const watcher = chokidar.watch(pinsPath, {
+      persistent: true,
+      ignoreInitial: true,
+      followSymlinks: false,
+      atomic: true,
+      usePolling: true,
+      interval: 1_000,
+    });
+    watcher
+      .on('add', broadcastSessionStarsChanged)
+      .on('change', broadcastSessionStarsChanged)
+      .on('unlink', broadcastSessionStarsChanged)
+      .on('error', (error: unknown) => {
+        console.error('OMP session pins watcher error', { pinsPath, error });
+      });
+    watchers.push(watcher);
+  } catch (error) {
+    console.error('Failed to initialize OMP session pins watcher', { pinsPath, error });
+  }
+}
+
 /**
  * Starts provider filesystem watchers and performs initial DB synchronization.
  */
 export async function initializeSessionsWatcher(): Promise<void> {
   console.log('Setting up session watchers');
+  await initializeOmpPinsWatcher();
 
   const initialSync = await sessionSynchronizerService.synchronizeSessions();
   console.log('Initial session synchronization complete', {

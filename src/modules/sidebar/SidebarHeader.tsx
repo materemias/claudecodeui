@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Activity, Archive, Folder, FolderPlus, MessageSquare, Plus, RefreshCw, Search, X, PanelLeftClose } from 'lucide-react';
+import { Activity, Archive, Folder, FolderPlus, MessageSquare, Plus, RefreshCw, Search, Star, X, PanelLeftClose } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Button, Input, Tooltip } from '@/shared/ui';
@@ -24,6 +24,9 @@ type SidebarHeaderProps = {
   onClearSearchFilter: () => void;
   searchMode: SidebarSearchMode;
   onSearchModeChange: (mode: SidebarSearchMode) => void;
+  /** A filter, not a view: it narrows whichever searchMode is selected to starred sessions. */
+  isStarredSessionsOnly: boolean;
+  onToggleStarredSessionsOnly: () => void;
   onRefresh: () => void;
   isRefreshing: boolean;
   onCreateProject: () => void;
@@ -64,6 +67,8 @@ export default function SidebarHeader({
   onClearSearchFilter,
   searchMode,
   onSearchModeChange,
+  isStarredSessionsOnly,
+  onToggleStarredSessionsOnly,
   onRefresh,
   isRefreshing,
   onCreateProject,
@@ -226,13 +231,13 @@ export default function SidebarHeader({
                 placeholder={searchPlaceholder}
                 value={searchFilter}
                 onChange={(event) => onSearchFilterChange(event.target.value)}
-                className="nav-search-input h-9 rounded-xl border-0 pl-9 pr-14 text-sm transition-all duration-200 placeholder:text-muted-foreground/40 focus-visible:ring-0 focus-visible:ring-offset-0"
+                className="nav-search-input h-9 rounded-xl border-0 pl-9 pr-24 text-sm transition-all duration-200 placeholder:text-muted-foreground/40 focus-visible:ring-0 focus-visible:ring-offset-0"
               />
               {searchFilter ? (
                 <button
                   onClick={onClearSearchFilter}
                   aria-label={t('tooltips.clearSearch')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-0.5 hover:bg-accent"
+                  className="absolute right-11 top-1/2 -translate-y-1/2 rounded-md p-0.5 hover:bg-accent"
                 >
                   <X className="h-3 w-3 text-muted-foreground" />
                 </button>
@@ -240,12 +245,35 @@ export default function SidebarHeader({
                 <kbd
                   aria-hidden
                   title={t('tooltips.openCommandPalette')}
-                  className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground md:inline-flex"
+                  className="pointer-events-none absolute right-11 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground md:inline-flex"
                 >
                   {MOD_KEY}
                   <span>K</span>
                 </kbd>
               )}
+              <div className="absolute right-1 top-1/2 -translate-y-1/2">
+              <Tooltip content={t('search.starredOnlyTooltip', 'Starred sessions only')} position="top">
+                <button
+                  onClick={onToggleStarredSessionsOnly}
+                  aria-pressed={isStarredSessionsOnly}
+                  aria-label={t('search.starredOnlyTooltip', 'Starred sessions only')}
+                  title={t('search.starredOnlyTooltip', 'Starred sessions only')}
+                  className={cn(
+                    "flex h-7 w-7 items-center justify-center rounded-lg transition-all hover:bg-accent",
+                    isStarredSessionsOnly
+                      ? "bg-background shadow-sm text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <Star
+                    className={cn(
+                      "h-3.5 w-3.5",
+                      isStarredSessionsOnly && "fill-current text-yellow-600 dark:text-yellow-400",
+                    )}
+                  />
+                </button>
+              </Tooltip>
+              </div>
             </div>
           </div>
         )}
@@ -294,6 +322,29 @@ export default function SidebarHeader({
               >
                 <Search className="h-4 w-4" />
               </button>
+            )}
+            {showSearchTools && (
+              <Tooltip content={t('search.starredOnlyTooltip', 'Starred sessions only')} position="top">
+                <button
+                  onClick={onToggleStarredSessionsOnly}
+                  aria-pressed={isStarredSessionsOnly}
+                  aria-label={t('search.starredOnlyTooltip', 'Starred sessions only')}
+                  title={t('search.starredOnlyTooltip', 'Starred sessions only')}
+                  className={cn(
+                    "flex h-8 w-8 items-center justify-center rounded-lg bg-muted/50 transition-all active:scale-95",
+                    isStarredSessionsOnly
+                      ? "bg-background shadow-sm text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <Star
+                    className={cn(
+                      "h-4 w-4",
+                      isStarredSessionsOnly && "fill-current text-yellow-600 dark:text-yellow-400",
+                    )}
+                  />
+                </button>
+              </Tooltip>
             )}
             <button
               className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/90 text-primary-foreground transition-all active:scale-95"

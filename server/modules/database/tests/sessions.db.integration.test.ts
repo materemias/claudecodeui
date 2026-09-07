@@ -91,6 +91,73 @@ test('full rescans preserve archived sessions while live updates reactivate them
   });
 });
 
+test('provider-row merges preserve a starred session', async () => {
+  await withIsolatedDatabase(() => {
+    const projectPath = '/workspace/merge-stars';
+
+    sessionsDb.createSession('native-fork', 'claude', projectPath, 'Fork source');
+    sessionsDb.updateSessionIsStarred('native-fork', true);
+    sessionsDb.createForkedSession({
+      sessionId: 'app-fork',
+      provider: 'claude',
+      projectPath,
+      customName: 'Fork target',
+      providerSessionId: 'native-fork',
+      jsonlPath: '/tmp/app-fork.jsonl',
+      forkedFromSessionId: 'source',
+      model: null,
+      effort: null,
+    });
+    assert.equal(sessionsDb.getSessionById('app-fork')?.isStarred, 1);
+    assert.equal(sessionsDb.getSessionById('native-fork'), null);
+
+    sessionsDb.createAppSession('indexed-fork-row', 'claude', projectPath);
+    sessionsDb.assignProviderSessionId('indexed-fork-row', 'provider-fork-different');
+    sessionsDb.updateSessionIsStarred('indexed-fork-row', true);
+    sessionsDb.createForkedSession({
+      sessionId: 'app-fork-different',
+      provider: 'claude',
+      projectPath,
+      customName: 'Fork target with indexed source',
+      providerSessionId: 'provider-fork-different',
+      jsonlPath: '/tmp/app-fork-different.jsonl',
+      forkedFromSessionId: 'source',
+      model: null,
+      effort: null,
+    });
+    assert.equal(sessionsDb.getSessionById('app-fork-different')?.isStarred, 1);
+    assert.equal(sessionsDb.getSessionById('indexed-fork-row'), null);
+
+    sessionsDb.createAppSession('app-assign', 'claude', projectPath);
+    sessionsDb.createSession('native-assign', 'claude', projectPath, 'Assign source');
+    sessionsDb.updateSessionIsStarred('native-assign', true);
+    sessionsDb.assignProviderSessionId('app-assign', 'native-assign');
+    assert.equal(sessionsDb.getSessionById('app-assign')?.isStarred, 1);
+    assert.equal(sessionsDb.getSessionById('native-assign'), null);
+
+    sessionsDb.createAppSession('app-repoint', 'claude', projectPath);
+    sessionsDb.createSession('native-repoint', 'claude', projectPath, 'Repoint source');
+    sessionsDb.updateSessionIsStarred('native-repoint', true);
+    sessionsDb.repointSessionToProviderSession('app-repoint', {
+      providerSessionId: 'native-repoint',
+      jsonlPath: '/tmp/app-repoint.jsonl',
+    });
+    assert.equal(sessionsDb.getSessionById('app-repoint')?.isStarred, 1);
+    assert.equal(sessionsDb.getSessionById('native-repoint'), null);
+
+    sessionsDb.createAppSession('indexed-repoint-row', 'claude', projectPath);
+    sessionsDb.assignProviderSessionId('indexed-repoint-row', 'provider-repoint-different');
+    sessionsDb.updateSessionIsStarred('indexed-repoint-row', true);
+    sessionsDb.createAppSession('app-repoint-different', 'claude', projectPath);
+    sessionsDb.repointSessionToProviderSession('app-repoint-different', {
+      providerSessionId: 'provider-repoint-different',
+      jsonlPath: null,
+    });
+    assert.equal(sessionsDb.getSessionById('app-repoint-different')?.isStarred, 1);
+    assert.equal(sessionsDb.getSessionById('indexed-repoint-row'), null);
+  });
+});
+
 test("createSession leaves an archived row archived when the transcript has not changed", async () => {
   await withIsolatedDatabase(() => {
     const createdAt = "2026-07-18T09:00:00.000Z";

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
 import { useVersionCheck } from '@/shared/hooks/useVersionCheck';
 import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPreferencesContext';
+import { useWebSocket } from '@/shared/context/WebSocketContext';
 import { useSidebarController } from '@/modules/sidebar/hooks/useSidebarController';
 import { useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import { usePaletteOps } from '@/modules/command-palette';
@@ -88,6 +89,7 @@ function Sidebar({
   );
   const preferences = useUiPreferences();
   const setPreference = useSetUiPreference();
+  const { subscribe } = useWebSocket();
   const { sidebarVisible } = preferences;
   const { setCurrentProject, mcpServerStatus } = useTaskMaster() as TaskMasterSidebarContext;
   const { tasksEnabled } = useTasksSettings();
@@ -133,6 +135,13 @@ function Sidebar({
     handleSessionClick,
     toggleStarProject,
     isProjectStarred,
+    isSessionStarred,
+    toggleStarSession,
+    isStarredSessionsOnly,
+    isStarredSessionsLoading,
+    starredSessionsError,
+    starredSessionsLoaded,
+    toggleStarredSessionsOnly,
     getProjectSessions,
     loadingMoreProjects,
     loadMoreSessionsForProject,
@@ -181,6 +190,7 @@ function Sidebar({
     setCurrentProject,
     setSidebarVisible: (visible) => setPreference('sidebarVisible', visible),
     sidebarVisible,
+    subscribe,
   });
 
   useEffect(() => {
@@ -229,10 +239,12 @@ function Sidebar({
     terminalRunningSessions,
     attentionSessionIds,
     isProjectStarred,
+    isSessionStarred,
     onRenameDraftChange: updateRenameDraft,
     onToggleProject: toggleProject,
     onProjectSelect: handleProjectSelect,
     onToggleStarProject: toggleStarProject,
+    onToggleStarSession: toggleStarSession,
     onStartEditingProject: startEditingProject,
     onCancelEditingProject: cancelRename,
     onSaveProjectName: handleSaveProjectName,
@@ -302,6 +314,13 @@ function Sidebar({
             onSearchFilterChange={setSearchFilter}
             onClearSearchFilter={() => setSearchFilter('')}
             searchMode={searchMode}
+            isStarredSessionsOnly={isStarredSessionsOnly}
+            onToggleStarredSessionsOnly={toggleStarredSessionsOnly}
+            isStarredSessionsLoading={isStarredSessionsLoading}
+            starredSessionsError={starredSessionsError}
+            starredSessionsLoaded={starredSessionsLoaded}
+            isSessionStarred={isSessionStarred}
+            onToggleStarSession={toggleStarSession}
             onSearchModeChange={(mode) => {
               setSearchMode(mode);
               if (mode === 'projects') clearConversationResults();

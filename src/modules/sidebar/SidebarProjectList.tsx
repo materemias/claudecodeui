@@ -29,6 +29,8 @@ export default function SidebarProjectList({
   terminalRunningSessions,
   attentionSessionIds,
   isProjectStarred,
+  isSessionStarred,
+  onToggleStarSession,
   onRenameDraftChange,
   onToggleProject,
   onProjectSelect,
@@ -112,6 +114,8 @@ export default function SidebarProjectList({
                 onSessionSelect={onSessionSelect}
                 onDeleteSession={onDeleteSession}
                 onForkSession={onForkSession}
+                isSessionStarred={isSessionStarred}
+                onToggleStarSession={onToggleStarSession}
                 onLoadMoreSessions={onLoadMoreSessions}
                 activeSessions={activeSessions}
                 terminalRunningSessions={terminalRunningSessions}

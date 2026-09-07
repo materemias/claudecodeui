@@ -7,6 +7,7 @@ import { rgPath } from '@vscode/ripgrep';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { readNormalizedOmpHistory } from '@/modules/providers/list/omp/omp-sessions.provider.js';
+import { getStarredSessionRows } from '@/modules/providers/services/session-star.service.js';
 import type { NormalizedMessage } from '@/shared/types.js';
 
 type AnyRecord = Record<string, any>;
@@ -59,6 +60,7 @@ export type SessionConversationSearchProgressUpdate = {
 type SearchSessionConversationsInput = {
   query: string;
   limit: number;
+  starredOnly?: boolean;
   signal?: AbortSignal;
   onTitleResults?: (results: SessionTitleSearchResult[]) => void;
   onProgress?: (update: SessionConversationSearchProgressUpdate) => void;
@@ -1266,6 +1268,7 @@ export async function searchConversations(
   onProjectResult: ((update: SessionConversationSearchProgressUpdate) => void) | null = null,
   signal: AbortSignal | null = null,
   onTitleResults: ((results: SessionTitleSearchResult[]) => void) | null = null,
+  starredOnly = false,
 ): Promise<{
   results: ProjectConversationResult[];
   titleResults: SessionTitleSearchResult[];
@@ -1286,8 +1289,11 @@ export async function searchConversations(
     return { results: [], titleResults: [], totalMatches: 0, query: safeQuery };
   }
 
-  const activeSessions = sessionsDb.getAllSessions()
-    .filter((session) => !Boolean(session.is_one_shot));
+  const selectedSessions = starredOnly
+    ? await getStarredSessionRows()
+    : sessionsDb.getAllSessions();
+  const activeSessions = selectedSessions
+    .filter((session) => session.isArchived === 0 && session.is_one_shot !== 1);
   const titleResults = findSessionTitleResults(activeSessions, safeQuery, safeLimit);
   onTitleResults?.(titleResults);
 
@@ -1437,6 +1443,7 @@ export const sessionConversationsSearchService = {
       input.onProgress ?? null,
       input.signal ?? null,
       input.onTitleResults ?? null,
+      input.starredOnly ?? false,
     );
   },
 };

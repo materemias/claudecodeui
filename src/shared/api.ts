@@ -239,10 +239,11 @@ export const api = {
   // a query parameter on the streaming endpoints below.
   cloneProjectProgressUrl: (params: Record<string, QueryValue>) =>
     `/api/projects/clone-progress${query({ ...params, token: getStoredAuthToken() })}`,
-  searchConversationsUrl: (searchQuery: string, limit = 50) =>
+  searchConversationsUrl: (searchQuery: string, limit = 50, starredOnly = false) =>
     `/api/providers/search/sessions${query({
       q: searchQuery,
       limit,
+      starredOnly,
       token: getStoredAuthToken(),
     })}`,
 
@@ -254,6 +255,14 @@ export const api = {
   deleteSession: (sessionId: string, hardDelete = false) =>
     del(`/api/providers/sessions/${sessionId}${query({ force: hardDelete })}`),
   getArchivedSessions: () => get('/api/providers/sessions/archived'),
+  // Stars are a per-session flag on the DB row, toggled and read back the same
+  // way project stars are.
+  toggleSessionStar: (sessionId: string, desiredState?: boolean) =>
+    post(
+      `/api/providers/sessions/${encodeURIComponent(sessionId)}/toggle-star`,
+      desiredState === undefined ? undefined : { isStarred: desiredState },
+    ),
+  starredSessions: () => get('/api/providers/sessions/starred'),
   // Resolves one session by app id or provider-native id to its metadata and
   // owning project. Deep links and running rows use it when pagination omitted the session.
   sessionDetails: (sessionId: string) =>

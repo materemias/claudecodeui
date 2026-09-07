@@ -31,6 +31,7 @@ function createSessionRow(overrides: Partial<SessionRow> = {}): SessionRow {
     effort_dirty: 0,
     forked_from_session_id: null,
     is_one_shot: 0,
+    isStarred: 0,
     isArchived: 0,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',

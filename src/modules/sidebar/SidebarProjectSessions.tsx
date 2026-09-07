@@ -28,6 +28,9 @@ type SidebarProjectSessionsProps = {
   onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   onForkSession?: (session: SessionWithProvider) => void;
+  /** Star state stays a lookup so toggling one session does not change props on the others. */
+  isSessionStarred: (sessionId: string) => boolean;
+  onToggleStarSession: (sessionId: string) => void;
   onLoadMoreSessions: (projectId: string) => void;
   onNewSession: (project: Project) => void;
   t: TFunction;
@@ -74,6 +77,8 @@ export default function SidebarProjectSessions({
   onSessionSelect,
   onDeleteSession,
   onForkSession,
+  isSessionStarred,
+  onToggleStarSession,
   onLoadMoreSessions,
   onNewSession,
   t,
@@ -123,6 +128,8 @@ export default function SidebarProjectSessions({
               onSessionSelect={onSessionSelect}
               onDeleteSession={onDeleteSession}
               onForkSession={onForkSession}
+              isStarred={isSessionStarred(session.id)}
+              onToggleStarSession={onToggleStarSession}
               t={t}
             />
           ))}
