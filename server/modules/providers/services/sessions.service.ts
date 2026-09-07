@@ -14,7 +14,12 @@ import type {
   NormalizedMessage,
   RunningSession,
 } from '@/shared/types.js';
-import { AppError, buildCloudCliSessionName, sliceTailPage } from '@/shared/utils.js';
+import {
+  AppError,
+  buildCloudCliSessionName,
+  buildProviderResumeCommand,
+  sliceTailPage,
+} from '@/shared/utils.js';
 
 type CreateAppSessionResult = {
   sessionId: string;
@@ -22,6 +27,22 @@ type CreateAppSessionResult = {
   projectPath: string;
   sessionName: string;
 };
+
+/**
+ * Produces one pasteable command for the user's terminal, using the same
+ * provider command metadata as the in-app shell. The server chooses the shell
+ * syntax because it also owns the persisted project path and host platform.
+ */
+function buildTerminalResumeCommand(projectPath: string, providerCommand: string): string {
+  const quotedProjectPath =
+    process.platform === 'win32'
+      ? `'${projectPath.replace(/'/g, "''")}'`
+      : `'${projectPath.replace(/'/g, "'\\''")}'`;
+
+  return process.platform === 'win32'
+    ? `Set-Location -LiteralPath ${quotedProjectPath}; if ($?) { ${providerCommand} }`
+    : `cd -- ${quotedProjectPath} && ${providerCommand}`;
+}
 
 type ArchivedSessionListItem = {
   sessionId: string;
@@ -366,6 +387,41 @@ export const sessionsService = {
     }
 
     return session.provider_session_id;
+  },
+
+  /**
+   * Builds the complete command a user can paste into a terminal to resume a
+   * persisted session from its project directory.
+   */
+  getTerminalResumeCommand(sessionId: string): string {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+
+    const providerCommand = buildProviderResumeCommand(
+      session.provider,
+      session.provider_session_id,
+    );
+    if (!providerCommand?.resume) {
+      throw new AppError('This session cannot be resumed from a terminal yet.', {
+        code: 'SESSION_RESUME_UNAVAILABLE',
+        statusCode: 409,
+      });
+    }
+
+    const projectPath = session.project_path;
+    if (!projectPath?.trim()) {
+      throw new AppError('This session has no project directory.', {
+        code: 'SESSION_PROJECT_PATH_UNAVAILABLE',
+        statusCode: 409,
+      });
+    }
+
+    return buildTerminalResumeCommand(projectPath, providerCommand.resume);
   },
 
   /**

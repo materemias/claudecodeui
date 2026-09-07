@@ -552,6 +552,29 @@ export type ProviderRunFunction = (
   writer: ProviderRuntimeWriter,
 ) => Promise<unknown>;
 
+// ---------------------------
+//----------------- PROVIDER RESUME COMMAND ------------
+/**
+ * One provider CLI's terminal invocation for a single session.
+ *
+ * `resume` is null until a provider-native session id exists; `bare` starts
+ * the same CLI with no session. `useInitialCommandWhenFresh` preserves the
+ * provider's existing shell behavior when no native id is available.
+ * `retriesWithoutResume` marks the CLIs that should fall back to `bare` when
+ * a resume attempt exits non-zero.
+ *
+ * Built by `buildProviderResumeCommand`; consumed by the shell websocket
+ * service (spawns it in the app's pty) and the sessions service (hands the
+ * line to the user for their own terminal).
+ */
+export type ProviderResumeCommand = {
+  resume: string | null;
+  bare: string;
+  /** Whether a shell init command takes precedence over `bare` without a session id. */
+  useInitialCommandWhenFresh: boolean;
+  retriesWithoutResume: boolean;
+};
+
 /**
  * Shared options used to fetch historical provider messages.
  *

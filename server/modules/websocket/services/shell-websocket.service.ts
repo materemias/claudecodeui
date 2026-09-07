@@ -5,7 +5,11 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+import {
+  buildProviderResumeCommand,
+  parseIncomingJsonObject,
+  SAFE_PROVIDER_SESSION_ID_PATTERN,
+} from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
   type?: string;
@@ -143,8 +147,6 @@ function parseShellMessage(rawMessage: RawData): ShellIncomingMessage | null {
   return payload as ShellIncomingMessage;
 }
 
-const SAFE_SESSION_ID_PATTERN = /^[a-zA-Z0-9_.\-:]+$/;
-
 function resolveResumeSessionId(
   message: ShellIncomingMessage,
   dependencies: ShellWebSocketDependencies
@@ -166,7 +168,7 @@ function resolveResumeSessionId(
   }
 
   const resolvedSessionId = resumeSessionId === undefined ? sessionId : resumeSessionId;
-  if (!resolvedSessionId || !SAFE_SESSION_ID_PATTERN.test(resolvedSessionId)) {
+  if (!resolvedSessionId || !SAFE_PROVIDER_SESSION_ID_PATTERN.test(resolvedSessionId)) {
     return '';
   }
 
@@ -193,54 +195,32 @@ function buildShellCommand(
     return initialCommand;
   }
 
-  if (provider === 'cursor') {
-    if (resumeSessionId) {
-      return `cursor-agent --resume="${resumeSessionId}"`;
-    }
-    return 'cursor-agent';
-  }
-
-  if (provider === 'codex') {
-    if (resumeSessionId) {
-      if (os.platform() === 'win32') {
-        return `codex resume "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { codex }`;
-      }
-      return `codex resume "${resumeSessionId}" || codex`;
-    }
-    return 'codex';
-  }
-
-  if (provider === 'opencode') {
-    if (resumeSessionId) {
-      return `opencode --session "${resumeSessionId}"`;
-    }
-    return initialCommand || 'opencode';
-  }
-
-  if (provider === 'omp') {
-    if (resumeSessionId) {
-      if (os.platform() === 'win32') {
-        return `omp -r "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { omp }`;
-      }
-      return `omp -r "${resumeSessionId}" || omp`;
-    }
-    return initialCommand || 'omp';
-  }
-
   // Launching with the flag is what unlocks "bypass permissions" in the CLI's
   // shift+tab permission-mode cycle; it cannot be enabled from inside a
   // session started without it.
-  const bypassFlag = readBoolean(message.bypassPermissions)
-    ? ' --dangerously-skip-permissions'
-    : '';
-  const command = initialCommand || `claude${bypassFlag}`;
-  if (resumeSessionId) {
-    if (os.platform() === 'win32') {
-      return `claude --resume "${resumeSessionId}"${bypassFlag}; if ($LASTEXITCODE -ne 0) { claude${bypassFlag} }`;
-    }
-    return `claude --resume "${resumeSessionId}"${bypassFlag} || claude${bypassFlag}`;
+  const providerCommand = buildProviderResumeCommand(provider, resumeSessionId || null, {
+    bypassPermissions: readBoolean(message.bypassPermissions),
+  });
+  if (!providerCommand) {
+    return initialCommand;
   }
-  return command;
+
+  const freshCommand = providerCommand.useInitialCommandWhenFresh
+    ? initialCommand || providerCommand.bare
+    : providerCommand.bare;
+  if (!providerCommand.resume) {
+    return freshCommand;
+  }
+
+  if (!providerCommand.retriesWithoutResume) {
+    return providerCommand.resume;
+  }
+
+  const fallbackCommand = providerCommand.bare;
+  if (os.platform() === 'win32') {
+    return `${providerCommand.resume}; if ($LASTEXITCODE -ne 0) { ${fallbackCommand} }`;
+  }
+  return `${providerCommand.resume} || ${fallbackCommand}`;
 }
 
 function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
@@ -401,8 +381,7 @@ export function handleShellConnection(
           return;
         }
 
-        const safeSessionIdPattern = /^[a-zA-Z0-9_.\-:]+$/;
-        if (sessionId && !safeSessionIdPattern.test(sessionId)) {
+        if (sessionId && !SAFE_PROVIDER_SESSION_ID_PATTERN.test(sessionId)) {
           ws.send(JSON.stringify({ type: 'error', message: 'Invalid session ID' }));
           return;
         }

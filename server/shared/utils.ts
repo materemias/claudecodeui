@@ -26,6 +26,7 @@ import type {
   NormalizedMessage,
   ProviderCurrentActiveModel,
   ProviderModelsDefinition,
+  ProviderResumeCommand,
   ProviderSkillSource,
   SubagentActivity,
   WorkspacePathValidationResult,
@@ -1163,6 +1164,76 @@ export function flattenPromptForWindowsShell(prompt: string): string {
     return prompt;
   }
   return prompt.replace(/\s*\r?\n\s*/g, ' ').trim();
+}
+
+// ---------------------------
+//----------------- PROVIDER RESUME COMMAND UTILITIES ------------
+/** Session id characters accepted by provider resume commands and the shell websocket. */
+export const SAFE_PROVIDER_SESSION_ID_PATTERN = /^[a-zA-Z0-9_.\-:]+$/;
+
+/** Options that affect the provider command emitted for terminal launch. */
+type ProviderResumeCommandOptions = {
+  bypassPermissions?: boolean;
+};
+
+/**
+ * Provider-native ids come from the session index and are restricted to the
+ * same shell-safe character set enforced by the terminal websocket. A null
+ * result means the provider has no terminal resume command or the id failed
+ * validation.
+ */
+export function buildProviderResumeCommand(
+  provider: string,
+  providerSessionId: string | null | undefined,
+  options: ProviderResumeCommandOptions = {},
+): ProviderResumeCommand | null {
+  const resumeId = providerSessionId || null;
+  if (resumeId && !SAFE_PROVIDER_SESSION_ID_PATTERN.test(resumeId)) {
+    return null;
+  }
+
+  const bypassFlag = options.bypassPermissions ? ' --dangerously-skip-permissions' : '';
+
+  switch (provider) {
+    case 'plain-shell':
+      return null;
+    case 'cursor':
+      return {
+        resume: resumeId ? `cursor-agent --resume="${resumeId}"` : null,
+        bare: 'cursor-agent',
+        useInitialCommandWhenFresh: false,
+        retriesWithoutResume: false,
+      };
+    case 'codex':
+      return {
+        resume: resumeId ? `codex resume "${resumeId}"` : null,
+        bare: 'codex',
+        useInitialCommandWhenFresh: false,
+        retriesWithoutResume: true,
+      };
+    case 'opencode':
+      return {
+        resume: resumeId ? `opencode --session "${resumeId}"` : null,
+        bare: 'opencode',
+        useInitialCommandWhenFresh: true,
+        retriesWithoutResume: false,
+      };
+    case 'omp':
+      return {
+        resume: resumeId ? `omp -r "${resumeId}"` : null,
+        bare: 'omp',
+        useInitialCommandWhenFresh: true,
+        retriesWithoutResume: true,
+      };
+    case 'claude':
+    default:
+      return {
+        resume: resumeId ? `claude --resume "${resumeId}"${bypassFlag}` : null,
+        bare: `claude${bypassFlag}`,
+        useInitialCommandWhenFresh: true,
+        retriesWithoutResume: true,
+      };
+  }
 }
 
 // ---------------------------
