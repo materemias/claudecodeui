@@ -78,8 +78,6 @@ function ChatInterface({
   } = useSessionProtectionActions();
 
   const sessionStore = useSessionStore();
-  const streamTimerRef = useRef<number | null>(null);
-  const accumulatedStreamRef = useRef('');
   // When each session's `chat.subscribe` was last sent; idle acks older than
   // a later local request are discarded as stale.
   const statusCheckSentAtRef = useRef(new Map<string, number>());
@@ -88,13 +86,6 @@ function ChatInterface({
   // server replays only the events this client actually missed.
   const lastSeqRef = useRef(new Map<string, number>());
 
-  const resetStreamingState = useCallback(() => {
-    if (streamTimerRef.current) {
-      clearTimeout(streamTimerRef.current);
-      streamTimerRef.current = null;
-    }
-    accumulatedStreamRef.current = '';
-  }, []);
 
   const {
     provider,
@@ -165,7 +156,6 @@ function ChatInterface({
     newSessionTrigger,
     processingSessions,
     onSessionIdle,
-    resetStreamingState,
     statusCheckSentAtRef,
     lastSeqRef,
     sessionStore,
@@ -282,8 +272,6 @@ function ChatInterface({
     setTokenBudget,
     pendingPermissionRequests,
     setPendingPermissionRequests,
-    streamTimerRef,
-    accumulatedStreamRef,
     lastSeqRef,
     statusCheckSentAtRef,
     onSessionProcessing,
@@ -313,11 +301,6 @@ function ChatInterface({
     };
   }, [canAbortSession, handleAbortSession]);
 
-  useEffect(() => {
-    return () => {
-      resetStreamingState();
-    };
-  }, [resetStreamingState]);
 
   /**
    * Branches the conversation into a new session that ends at this message,
@@ -396,8 +379,10 @@ function ChatInterface({
       : provider === 'codex'
         ? t('messageTypes.codex')
         : provider === 'opencode'
-            ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
-          : t('messageTypes.claude');
+          ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
+          : provider === 'omp'
+            ? t('messageTypes.omp', { defaultValue: 'omp' })
+            : t('messageTypes.claude');
 
   if (!selectedProject) {
     return (
