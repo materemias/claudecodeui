@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ReactNode } from 'react';
 
@@ -8,7 +8,7 @@ import { AUTH_SESSION_EXPIRED_EVENT, AUTH_TOKEN_REFRESHED_EVENT, getAuthTokenRef
 import { hydrateChatDrafts, resetChatDrafts } from '@/shared/chatDrafts';
 import { hydrateUserPreferences, resetUserPreferences } from '@/shared/userSettings';
 /** The signed-in account held by AuthContext - a required `username` plus an optional id and any additional fields the auth API returns - and should be read through `useAuth()` rather than re-derived from raw auth responses. */
-type AuthUser = {
+export type AuthUser = {
   id?: number | string;
   username: string;
   [key: string]: unknown;
@@ -22,7 +22,12 @@ const AUTH_ERROR_MESSAGES = {
   registrationFailed: 'errors.registrationFailed',
   networkError: 'errors.networkError',
   sessionExpired: 'errors.sessionExpired',
+  // Shown as written, not resolved through `t`: upstream has no locale entry
+  // for this state yet, so a key here would render as the key itself.
+  authUnavailable: 'Cannot reach the server. Your session is kept while CloudCLI retries.',
 } as const;
+
+const AUTH_RETRY_INTERVAL_MS = 5000;
 
 type AuthActionResult = { success: true } | { success: false; error: string };
 
@@ -50,17 +55,19 @@ type ApiErrorPayload = {
   message?: string;
 };
 
-type AuthContextValue = {
+export type AuthContextValue = {
   user: AuthUser | null;
   token: string | null;
   isLoading: boolean;
   needsSetup: boolean;
   hasCompletedOnboarding: boolean;
   error: string | null;
+  authUnavailable: boolean;
   login: (username: string, password: string) => Promise<AuthActionResult>;
   register: (username: string, password: string) => Promise<AuthActionResult>;
   logout: () => void;
   refreshOnboardingStatus: () => Promise<void>;
+  retryAuthCheck: () => Promise<void>;
 };
 
 type AuthProviderProps = {
@@ -81,6 +88,23 @@ function resolveApiErrorMessage(payload: ApiErrorPayload | null, fallback: strin
   }
 
   return payload.error ?? payload.message ?? fallback;
+}
+
+export type AuthProbeResult = 'authenticated' | 'rejected' | 'unavailable';
+
+export function classifyAuthProbe(response: Response): AuthProbeResult {
+  if (response.ok) {
+    return 'authenticated';
+  }
+
+  return response.headers.get('X-Auth-Error') ? 'rejected' : 'unavailable';
+}
+
+export function rejectionEndsSession(
+  sentToken: string | null,
+  storedToken: string | null,
+): boolean {
+  return sentToken !== null && sentToken === storedToken;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -113,16 +137,25 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [needsSetup, setNeedsSetup] = useState(false);
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [authUnavailable, setAuthUnavailable] = useState(false);
+  const authProbeId = useRef(0);
+  const retryInFlight = useRef<Promise<void> | null>(null);
 
   const setSession = useCallback((nextUser: AuthUser, nextToken: string) => {
+    authProbeId.current += 1;
+    retryInFlight.current = null;
     setUser(nextUser);
     setToken(nextToken);
+    setAuthUnavailable(false);
     persistToken(nextToken);
   }, []);
 
   const clearSession = useCallback(() => {
+    authProbeId.current += 1;
     setUser(null);
+    retryInFlight.current = null;
     setToken(null);
+    setAuthUnavailable(false);
     clearStoredToken();
     // Otherwise the next person to sign in on this device would start out
     // looking at the previous user's theme, language, permissions and drafts.
@@ -189,6 +222,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     const handleTokenRefreshed = (event: Event) => {
       const nextToken = (event as CustomEvent<unknown>).detail;
       if (isValidRefreshedToken(nextToken)) {
+        authProbeId.current += 1;
+        retryInFlight.current = null;
         setToken(nextToken);
       }
     };
@@ -205,44 +240,97 @@ export function AuthProvider({ children }: AuthProviderProps) {
     };
   }, [clearSession, t]);
 
-  const checkAuthStatus = useCallback(async () => {
+  const checkAuthStatus = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    const probeId = (authProbeId.current += 1);
+    const superseded = () => authProbeId.current !== probeId;
+
     try {
-      setIsLoading(true);
+      if (!silent) {
+        setIsLoading(true);
+      }
       setError(null);
 
       const statusResponse = await api.auth.status();
       const statusPayload = await parseJsonSafely<AuthStatusPayload>(statusResponse);
 
-      if (statusPayload?.needsSetup) {
+      if (superseded()) {
+        return;
+      }
+
+      if (statusResponse.ok && statusPayload?.needsSetup) {
         setNeedsSetup(true);
+        setAuthUnavailable(false);
+        return;
+      }
+
+      if (!statusResponse.ok) {
+        if (token) {
+          setAuthUnavailable(true);
+          setError(AUTH_ERROR_MESSAGES.authUnavailable);
+        } else {
+          setError(t(AUTH_ERROR_MESSAGES.networkError));
+        }
         return;
       }
 
       setNeedsSetup(false);
 
       if (!token) {
+        setAuthUnavailable(false);
         return;
       }
 
+      const sentToken = token;
       const userResponse = await api.auth.user();
-      if (!userResponse.ok) {
-        clearSession();
+      const probe = classifyAuthProbe(userResponse);
+
+      if (superseded()) {
         return;
       }
 
-      const userPayload = await parseJsonSafely<AuthUserPayload>(userResponse);
+      if (probe === 'rejected') {
+        if (rejectionEndsSession(sentToken, readStoredToken())) {
+          clearSession();
+          setError(t(AUTH_ERROR_MESSAGES.sessionExpired));
+        }
+        return;
+      }
+
+      const userPayload = probe === 'authenticated'
+        ? await parseJsonSafely<AuthUserPayload>(userResponse)
+        : null;
+
+      if (superseded()) {
+        return;
+      }
+
       if (!userPayload?.user) {
-        clearSession();
+        setAuthUnavailable(true);
+        setError(AUTH_ERROR_MESSAGES.authUnavailable);
         return;
       }
 
       setUser(userPayload.user);
+      setAuthUnavailable(false);
       await checkOnboardingStatus();
     } catch (caughtError) {
-      console.error('[Auth] Auth status check failed:', caughtError);
-      setError(t(AUTH_ERROR_MESSAGES.authStatusCheckFailed));
+      console.warn('[Auth] Auth status check could not complete:', caughtError);
+
+      if (superseded()) {
+        return;
+      }
+
+      if (token) {
+        setAuthUnavailable(true);
+        setError(AUTH_ERROR_MESSAGES.authUnavailable);
+      } else {
+        setError(t(AUTH_ERROR_MESSAGES.networkError));
+      }
     } finally {
-      setIsLoading(false);
+      if (!superseded()) {
+        setIsLoading(false);
+      }
     }
   }, [checkOnboardingStatus, clearSession, t, token]);
 
@@ -258,6 +346,43 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     void checkAuthStatus();
   }, [checkAuthStatus, checkOnboardingStatus]);
+
+  const retryAuthCheck = useCallback((): Promise<void> => {
+    if (retryInFlight.current) {
+      return retryInFlight.current;
+    }
+
+    const retry = checkAuthStatus({ silent: true }).finally(() => {
+      if (retryInFlight.current === retry) {
+        retryInFlight.current = null;
+      }
+    });
+    retryInFlight.current = retry;
+    return retry;
+  }, [checkAuthStatus]);
+
+  useEffect(() => {
+    if (IS_PLATFORM || !authUnavailable || !token || user) {
+      return undefined;
+    }
+
+    const retry = () => void retryAuthCheck();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        retry();
+      }
+    };
+
+    const retryTimer = window.setInterval(retry, AUTH_RETRY_INTERVAL_MS);
+    window.addEventListener('online', retry);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(retryTimer);
+      window.removeEventListener('online', retry);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [authUnavailable, retryAuthCheck, token, user]);
 
   useEffect(() => {
     if (IS_PLATFORM || !token || !user) {
@@ -359,12 +484,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
       needsSetup,
       hasCompletedOnboarding,
       error,
+      authUnavailable,
       login,
       register,
       logout,
       refreshOnboardingStatus,
+      retryAuthCheck,
     }),
     [
+      authUnavailable,
       error,
       hasCompletedOnboarding,
       isLoading,
@@ -373,6 +501,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       needsSetup,
       refreshOnboardingStatus,
       register,
+      retryAuthCheck,
       token,
       user,
     ],
