@@ -147,7 +147,8 @@
       "loadAll": "Carica tutti i messaggi",
       "loadingAll": "Caricamento di tutti i messaggi...",
       "allLoaded": "Tutti i messaggi caricati",
-      "perfWarning": "Tutti i messaggi caricati — lo scorrimento potrebbe essere più lento. Clicca \"Scorri in basso\" per ripristinare le prestazioni."
+      "perfWarning": "Tutti i messaggi caricati — lo scorrimento potrebbe essere più lento. Clicca \"Scorri in basso\" per ripristinare le prestazioni.",
+      "turnInterrupted": "La connessione all'agente è caduta prima che questo turno finisse. Invia di nuovo per continuare."
     }
   },
   "shell": {

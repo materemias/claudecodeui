@@ -131,6 +131,19 @@ test('preserves both UI objects produced by an unchanged task notification', () 
   assert.equal(updated[1]?.content, 'Detailed result');
 });
 
+test('projects an interrupted turn as a notice without embedding locale text', () => {
+  const [projected] = normalizedToChatMessages([
+    message('interrupted', {
+      kind: 'turn_interrupted',
+      content: undefined,
+    }),
+  ]);
+
+  assert.equal(projected?.type, 'assistant');
+  assert.equal(projected?.isTurnInterrupted, true);
+  assert.equal(projected?.content, undefined);
+});
+
 test('renders the final structured checklist state from a matching result', () => {
   const toolUse = message('todo-use', {
     provider: 'omp',

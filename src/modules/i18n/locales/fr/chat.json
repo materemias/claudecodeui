@@ -149,7 +149,8 @@
       "loadAll": "Charger tous les messages",
       "loadingAll": "Chargement de tous les messages...",
       "allLoaded": "Tous les messages chargés",
-      "perfWarning": "Tous les messages chargés — le défilement peut être plus lent. Cliquez sur « Défiler vers le bas » pour rétablir les performances."
+      "perfWarning": "Tous les messages chargés — le défilement peut être plus lent. Cliquez sur « Défiler vers le bas » pour rétablir les performances.",
+      "turnInterrupted": "La connexion à l'agent a été interrompue avant la fin de ce tour. Renvoyez le message pour continuer."
     }
   },
   "shell": {
