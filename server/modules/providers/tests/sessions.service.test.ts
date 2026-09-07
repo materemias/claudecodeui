@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { closeConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { chatRunRegistry } from '@/modules/websocket/index.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -119,6 +120,7 @@ test('recent sessions map project metadata and preserve database pagination', { 
         projectDisplayName: 'Recent Project',
         sessionTitle: 'Newer conversation',
         lastActivity: '2026-08-01T11:00:00.000Z',
+        isOneShot: false,
       }],
       total: 2,
       hasMore: true,
@@ -190,4 +192,40 @@ test('history pages are sliced from the cached full transcript and see appended 
   } finally {
     await rm(transcriptDirectory, { recursive: true, force: true });
   }
+});
+
+test('running sessions report the one-shot flag stored for each run', { concurrency: false }, async () => {
+  const originalRunningRuns = chatRunRegistry.listRunningRuns;
+
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession(
+      'one-shot-run',
+      'claude',
+      '/workspace/one-shot-project',
+      'Print sessions',
+      undefined,
+      undefined,
+      undefined,
+      { isOneShot: true },
+    );
+    sessionsDb.createAppSession('interactive-run', 'claude', '/workspace/one-shot-project');
+    chatRunRegistry.listRunningRuns = () => [
+      { sessionId: 'one-shot-run', provider: 'claude', startedAt: 100, lastSeq: 1 },
+      { sessionId: 'interactive-run', provider: 'claude', startedAt: 200, lastSeq: 2 },
+    ];
+
+    try {
+      const running = sessionsService.listRunningSessions();
+      assert.equal(
+        running.find((session) => session.sessionId === 'one-shot-run')?.isOneShot,
+        true,
+      );
+      assert.equal(
+        running.find((session) => session.sessionId === 'interactive-run')?.isOneShot,
+        false,
+      );
+    } finally {
+      chatRunRegistry.listRunningRuns = originalRunningRuns;
+    }
+  });
 });

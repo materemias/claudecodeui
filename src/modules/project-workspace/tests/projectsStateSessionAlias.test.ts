@@ -16,12 +16,13 @@ import type { Project, ProjectSession } from '@/shared/types';
  */
 
 const projectsResponse = vi.fn();
+const sessionDetailsResponse = vi.fn();
 
 vi.mock('@/shared/api', () => ({
   api: {
     projects: () => projectsResponse(),
     projectTaskmaster: () => Promise.resolve({ ok: false }),
-    sessionDetails: () => Promise.resolve({ ok: false }),
+    sessionDetails: () => sessionDetailsResponse(),
     projectSessions: () => Promise.resolve({ ok: false }),
   },
 }));
@@ -53,7 +54,7 @@ const emit = (event: Record<string, unknown>) => {
   }
 };
 
-const buildUpsert = (providerSessionId: string | null) => ({
+const buildUpsert = (providerSessionId: string | null, isOneShot = false) => ({
   kind: 'session_upserted',
   sessionId: APP_SESSION_ID,
   providerSessionId,
@@ -63,6 +64,7 @@ const buildUpsert = (providerSessionId: string | null) => ({
     summary: 'merged session',
     messageCount: 0,
     lastActivity: '2026-01-01T00:00:00.000Z',
+    isOneShot,
   },
   project: {
     projectId: 'project-1',
@@ -96,6 +98,8 @@ const renderProjectsState = async (navigate: ReturnType<typeof vi.fn>, urlSessio
 beforeEach(() => {
   localStorage.clear();
   projectsResponse.mockReset();
+  sessionDetailsResponse.mockReset();
+  sessionDetailsResponse.mockResolvedValue({ ok: false });
   listeners.clear();
 });
 
@@ -189,4 +193,55 @@ test('an upsert for a session that is already canonical does not renavigate', as
 
   assert.equal(result.current.selectedSession?.id, APP_SESSION_ID);
   assert.deepEqual(navigate.mock.calls, []);
+});
+
+test('one-shot rows stay out of projects while a directly opened hidden session can leave', async () => {
+  respondWith([buildProject([
+    { id: 'visible-1', summary: 'ordinary terminal session' },
+    { id: APP_SESSION_ID, summary: 'print session', isOneShot: true },
+  ])]);
+  sessionDetailsResponse.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      data: {
+        sessionId: APP_SESSION_ID,
+        provider: 'claude',
+        summary: 'print session',
+        isOneShot: true,
+        project: {
+          projectId: 'project-1',
+          path: '/repo',
+          fullPath: '/repo',
+          displayName: 'Repo',
+          isStarred: false,
+        },
+      },
+    }),
+  });
+  const navigate = vi.fn();
+  const { result } = await renderProjectsState(navigate, APP_SESSION_ID);
+
+  await waitFor(() => {
+    assert.equal(result.current.selectedSession?.id, APP_SESSION_ID);
+  });
+  assert.deepEqual(
+    (result.current.projects[0]?.sessions ?? []).map((session) => session.id),
+    ['visible-1'],
+    'missing isOneShot remains visible while explicit true is removed',
+  );
+
+  await act(async () => {
+    emit(buildUpsert(null, true));
+  });
+  assert.deepEqual(
+    (result.current.projects[0]?.sessions ?? []).map((session) => session.id),
+    ['visible-1'],
+  );
+  assert.equal(result.current.selectedSession?.isOneShot, true);
+
+  act(() => {
+    result.current.handleProjectSelect(result.current.projects[0]!);
+  });
+  assert.equal(result.current.selectedSession, null);
+  assert.deepEqual(navigate.mock.calls.at(-1), ['/']);
 });

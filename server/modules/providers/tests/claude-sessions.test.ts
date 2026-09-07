@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { ClaudeSessionSynchronizer } from '@/modules/providers/list/claude/claude-session-synchronizer.provider.js';
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
@@ -27,6 +28,59 @@ async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promis
     await rm(tempDirectory, { recursive: true, force: true });
   }
 }
+
+test('Claude print sessions require both the queue marker and sdk-cli entrypoint', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-one-shot-'));
+    const synchronizer = new ClaudeSessionSynchronizer();
+    try {
+      const fixtures = [
+        {
+          id: 'claude-print',
+          lines: [
+            { type: 'queue-operation', operation: 'enqueue', sessionId: 'claude-print' },
+            { type: 'user', sessionId: 'claude-print', cwd: tempDirectory, entrypoint: 'sdk-cli' },
+          ],
+        },
+        {
+          id: 'claude-terminal',
+          lines: [
+            { type: 'queue-operation', operation: 'enqueue', sessionId: 'claude-terminal' },
+            { type: 'user', sessionId: 'claude-terminal', cwd: tempDirectory, entrypoint: 'cli' },
+          ],
+        },
+        {
+          id: 'claude-sdk-interactive',
+          lines: [
+            { type: 'user', sessionId: 'claude-sdk-interactive', cwd: tempDirectory, entrypoint: 'sdk-cli' },
+          ],
+        },
+        {
+          id: 'claude-app-native',
+          lines: [
+            { type: 'queue-operation', operation: 'enqueue', sessionId: 'claude-app-native' },
+            { type: 'user', sessionId: 'claude-app-native', cwd: tempDirectory, entrypoint: 'sdk-cli' },
+          ],
+        },
+      ];
+
+      sessionsDb.createAppSession('claude-app', 'claude', tempDirectory);
+      sessionsDb.assignProviderSessionId('claude-app', 'claude-app-native');
+      for (const fixture of fixtures) {
+        const filePath = path.join(tempDirectory, `${fixture.id}.jsonl`);
+        await writeFile(filePath, `${fixture.lines.map((line) => JSON.stringify(line)).join('\n')}\n`);
+        await synchronizer.synchronizeFile(filePath);
+      }
+
+      assert.equal(sessionsDb.getSessionById('claude-print')?.is_one_shot, 1);
+      assert.equal(sessionsDb.getSessionById('claude-terminal')?.is_one_shot, 0);
+      assert.equal(sessionsDb.getSessionById('claude-sdk-interactive')?.is_one_shot, 0);
+      assert.equal(sessionsDb.getSessionById('claude-app')?.is_one_shot, 0);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+});
 
 const SESSION_ID = 'claude-session-1';
 const AGENT_ID = 'a1b2c3d4e5f60718';

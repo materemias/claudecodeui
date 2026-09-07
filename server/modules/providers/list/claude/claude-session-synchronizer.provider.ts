@@ -16,6 +16,7 @@ type ParsedSession = {
   sessionId: string;
   projectPath: string;
   sessionName?: string;
+  isOneShot: boolean;
 };
 
 /**
@@ -72,7 +73,8 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
         parsed.sessionName,
         timestamps.createdAt,
         timestamps.updatedAt,
-        filePath
+        filePath,
+        { isOneShot: parsed.isOneShot, preserveArchived: since === undefined },
       );
       processed += 1;
     }
@@ -105,7 +107,8 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       parsed.sessionName,
       timestamps.createdAt,
       timestamps.updatedAt,
-      filePath
+      filePath,
+      { isOneShot: parsed.isOneShot },
     );
   }
 
@@ -116,10 +119,15 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     filePath: string,
     nameMap: Map<string, string>
   ): Promise<ParsedSession | null> {
+    let sawPrintQueueEntry = false;
     const parsed = await extractFirstValidJsonlData(filePath, (rawData) => {
       const data = rawData as Record<string, unknown>;
+      if (data.type === 'queue-operation' && data.operation === 'enqueue') {
+        sawPrintQueueEntry = true;
+      }
       const sessionId = typeof data.sessionId === 'string' ? data.sessionId : undefined;
       const projectPath = typeof data.cwd === 'string' ? data.cwd : undefined;
+      const entrypoint = typeof data.entrypoint === 'string' ? data.entrypoint : undefined;
 
       if (!sessionId || !projectPath) {
         return null;
@@ -128,6 +136,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       return {
         sessionId,
         projectPath,
+        isOneShot: sawPrintQueueEntry && entrypoint === 'sdk-cli',
       };
     });
 
@@ -139,21 +148,24 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     // ids must be resolved through the provider-id mapping first.
     const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
       ?? sessionsDb.getSessionById(parsed.sessionId);
+    const classifiedSession = existingSession && existingSession.session_id !== parsed.sessionId
+      ? { ...parsed, isOneShot: false }
+      : parsed;
     const existingSessionName = existingSession?.custom_name;
     if (existingSessionName && existingSessionName !== 'Untitled Claude Session') {
       return {
-        ...parsed,
+        ...classifiedSession,
         sessionName: normalizeSessionName(existingSessionName, 'Untitled Claude Session'),
       };
     }
 
-    let sessionName = nameMap.get(parsed.sessionId);
+    let sessionName = nameMap.get(classifiedSession.sessionId);
     if (!sessionName) {
-      sessionName = await this.extractSessionAiTitleFromEnd(filePath, parsed.sessionId);
+      sessionName = await this.extractSessionAiTitleFromEnd(filePath, classifiedSession.sessionId);
     }
 
     return {
-      ...parsed,
+      ...classifiedSession,
       sessionName: normalizeSessionName(sessionName, 'Untitled Claude Session'),
     };
   }

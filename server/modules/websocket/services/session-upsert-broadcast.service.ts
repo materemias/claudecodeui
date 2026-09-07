@@ -5,6 +5,17 @@ import { generateDisplayName } from '@/modules/projects/index.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import type { SessionUpsertedEvent } from '@/shared/types.js';
 
+// Every producer shares this queue. Building an event awaits project metadata,
+// so independent fire-and-forget calls could otherwise publish an older row
+// after a newer one for the same session.
+let broadcastQueue: Promise<void> = Promise.resolve();
+
+function enqueueBroadcast(task: () => Promise<void>): Promise<void> {
+  const queued = broadcastQueue.then(task, task);
+  broadcastQueue = queued.catch(() => undefined);
+  return queued;
+}
+
 /**
  * The single producer of the `session_upserted` delta.
  *
@@ -49,6 +60,15 @@ async function buildSessionUpsertedEvent(
       summary: row.custom_name || '',
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+      isOneShot: Boolean(row.is_one_shot),
+      selection: {
+        model: row.model?.trim() || null,
+        effort: row.effort?.trim() || null,
+        liveModel: row.live_model?.trim() || null,
+        liveEffort: row.live_effort?.trim() || null,
+        modelDirty: row.model_dirty === 1,
+        effortDirty: row.effort_dirty === 1,
+      },
     },
     project: project
       ? {
@@ -69,20 +89,27 @@ function sendToConnectedClients(payloads: string[]): void {
   }
 
   connectedClients.forEach((client) => {
-    if (client.readyState === WS_OPEN_STATE) {
+    if (client.readyState !== WS_OPEN_STATE) {
+      return;
+    }
+    try {
       for (const payload of payloads) {
         client.send(payload);
       }
+    } catch (error) {
+      console.warn('Session upsert send failed for one websocket client', error);
     }
   });
 }
 
 /** Announces one session. Used by the chat run registry when a run reports its provider-native id. */
-export async function broadcastSessionUpserted(sessionIdOrProviderSessionId: string): Promise<void> {
-  const event = await buildSessionUpsertedEvent(sessionIdOrProviderSessionId);
-  if (event) {
-    sendToConnectedClients([JSON.stringify(event)]);
-  }
+export function broadcastSessionUpserted(sessionIdOrProviderSessionId: string): Promise<void> {
+  return enqueueBroadcast(async () => {
+    const event = await buildSessionUpsertedEvent(sessionIdOrProviderSessionId);
+    if (event) {
+      sendToConnectedClients([JSON.stringify(event)]);
+    }
+  });
 }
 
 /**
@@ -90,18 +117,19 @@ export async function broadcastSessionUpserted(sessionIdOrProviderSessionId: str
  * watcher, whose debounced flush can carry dozens of ids at once — the client
  * set is walked once for the whole batch rather than once per session.
  */
-export async function broadcastSessionUpsertedBatch(
+export function broadcastSessionUpsertedBatch(
   sessionIds: Iterable<string>,
 ): Promise<void> {
-  const payloads: string[] = [];
-  for (const sessionId of sessionIds) {
-    const event = await buildSessionUpsertedEvent(sessionId);
-    if (event) {
-      payloads.push(JSON.stringify(event));
+  return enqueueBroadcast(async () => {
+    const payloads: string[] = [];
+    for (const sessionId of sessionIds) {
+      const event = await buildSessionUpsertedEvent(sessionId);
+      if (event) {
+        payloads.push(JSON.stringify(event));
+      }
     }
-  }
-
-  sendToConnectedClients(payloads);
+    sendToConnectedClients(payloads);
+  });
 }
 
 /** @internal Exported for the broadcast tests, which assert the payload shape directly. */

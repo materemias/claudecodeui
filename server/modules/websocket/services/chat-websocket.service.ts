@@ -240,15 +240,13 @@ async function dispatchRun(
   const clientOptions = (data.options ?? {}) as AnyRecord;
   const command = typeof data.content === 'string' ? data.content : '';
 
-  // Record what this turn runs with so reopening the session later restores the
-  // same model and reasoning effort, and so the resume path has a
-  // session-scoped model answer to use.
-  if (typeof clientOptions.model === 'string' && clientOptions.model.trim()) {
-    providerModelsService.setSessionModel(provider, sessionId, clientOptions.model);
-  }
-  if (typeof clientOptions.effort === 'string' && clientOptions.effort.trim()) {
-    providerModelsService.setSessionEffort(provider, sessionId, clientOptions.effort);
-  }
+  // The composer repeats its displayed selection on every send. Record only a
+  // genuinely new value so a provider-reported live model or effort is not
+  // turned back into a pending user pin.
+  providerModelsService.recordSessionSelectionOnSend(provider, sessionId, {
+    model: typeof clientOptions.model === 'string' ? clientOptions.model : null,
+    effort: typeof clientOptions.effort === 'string' ? clientOptions.effort : null,
+  });
 
   const attachmentCandidates = [
     ...normalizeAttachmentDescriptors(clientOptions.images),

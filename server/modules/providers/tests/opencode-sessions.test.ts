@@ -41,7 +41,11 @@ async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promis
   }
 }
 
-const createOpenCodeDatabase = async (homeDir: string, workspacePath: string): Promise<void> => {
+const createOpenCodeDatabase = async (
+  homeDir: string,
+  workspacePath: string,
+  permissionJson: string | null = null,
+): Promise<void> => {
   const dataDir = path.join(homeDir, '.local', 'share', 'opencode');
   await mkdir(dataDir, { recursive: true });
 
@@ -131,10 +135,10 @@ const createOpenCodeDatabase = async (homeDir: string, workspacePath: string): P
     );
     db.prepare(`
       INSERT INTO session (
-        id, project_id, slug, directory, title, version, time_created, time_updated, time_archived,
-        tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write
+        id, project_id, slug, directory, title, version, permission, time_created, time_updated,
+        time_archived, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       'open-session-1',
       'project-1',
@@ -142,6 +146,7 @@ const createOpenCodeDatabase = async (homeDir: string, workspacePath: string): P
       workspacePath,
       'OpenCode indexed title',
       '0.0.0',
+      permissionJson,
       1_700_000_000_000,
       1_700_000_004_000,
       null,
@@ -273,6 +278,28 @@ test('OpenCode session synchronizer indexes sqlite sessions without deletable tr
   }
 });
 
+test('OpenCode run permission rules classify external sessions as one-shot', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'opencode-session-one-shot-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+  const runPermissions = JSON.stringify([
+    { permission: 'question', action: 'deny' },
+    { permission: 'plan_enter', action: 'deny' },
+  ]);
+
+  try {
+    await createOpenCodeDatabase(tempRoot, workspacePath, runPermissions);
+    await withIsolatedDatabase(async () => {
+      await new OpenCodeSessionSynchronizer().synchronize();
+      assert.equal(sessionsDb.getSessionById('open-session-1')?.is_one_shot, 1);
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('OpenCode session synchronizer returns the app session id once provider mapping exists', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'opencode-session-sync-mapped-'));
   const workspacePath = path.join(tempRoot, 'workspace');
@@ -290,6 +317,7 @@ test('OpenCode session synchronizer returns the app session id once provider map
         assert.equal(sessionId, 'app-session-1');
         assert.equal(sessionsDb.getAllSessions().length, 1);
         assert.equal(sessionsDb.getSessionById('app-session-1')?.provider_session_id, 'open-session-1');
+        assert.equal(sessionsDb.getSessionById('app-session-1')?.is_one_shot, 0);
       });
     });
   } finally {
