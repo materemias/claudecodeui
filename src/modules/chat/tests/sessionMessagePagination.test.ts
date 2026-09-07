@@ -9,6 +9,7 @@ import {
   hasReachedCachedTailTimeBoundary,
   mergeLatestServerPage,
   mergeOlderServerPage,
+  messagesRepresentSamePersistedRow,
   planLatestPageBridge,
   resolveLatestPagePagination,
 } from '@/modules/chat/utils/sessionMessagePagination';
@@ -144,6 +145,68 @@ test('normal non-overlapping older pages prepend unchanged', () => {
   assert.equal(result.overlapLength, 0);
   assert.equal(result.prependedCount, 20);
   assert.deepEqual(result.messages.map((item) => item.id), range(61, 100).map((item) => item.id));
+});
+
+/**
+ * A status note carries its payload in `status`/`summary` alone, and a burst
+ * of them shares one timestamp. A page boundary landing inside such a run used
+ * to report a false overlap, which the store reads as "history shifted while
+ * fetching": the older page was dropped, the same offset was requested forever,
+ * and scrolling up loaded nothing.
+ */
+function statusNote(number: number): NormalizedMessage {
+  return {
+    id: `note_${number}`,
+    sessionId: 'session-1',
+    timestamp: '2026-09-05T08:32:32.643Z',
+    provider: 'claude',
+    kind: 'task_notification',
+    status: 'concern',
+    summary: `note ${number}`,
+  };
+}
+
+test('distinct status notes sharing a timestamp are not a page overlap', () => {
+  const cached = [...Array.from({ length: 6 }, (_, index) => statusNote(6 + index)), ...range(81, 94)];
+  const older = [...range(61, 74), ...Array.from({ length: 6 }, (_, index) => statusNote(index))];
+
+  const result = mergeOlderServerPage(cached, older);
+
+  assert.equal(result.overlapLength, 0);
+  assert.equal(result.prependedCount, 20);
+  assert.deepEqual(
+    result.messages.map((item) => item.id),
+    [...older, ...cached].map((item) => item.id),
+  );
+});
+
+test('two notes differing only in status are not the same row', () => {
+  assert.equal(
+    messagesRepresentSamePersistedRow(
+      { ...statusNote(1), status: 'concern' },
+      { ...statusNote(1), id: 'note_1b', status: 'blocker' },
+    ),
+    false,
+  );
+});
+
+test('a row whose compared fields are all empty never matches a different row', () => {
+  const bare: NormalizedMessage = {
+    id: 'placeholder',
+    sessionId: 'session-1',
+    timestamp: '2026-09-05T08:32:32.643Z',
+    provider: 'claude',
+    kind: 'task_notification',
+  };
+
+  assert.equal(
+    messagesRepresentSamePersistedRow({ ...bare, id: 'a' }, { ...bare, id: 'b' }),
+    false,
+  );
+  assert.equal(
+    messagesRepresentSamePersistedRow({ ...bare, id: 'a' }, { ...bare, id: 'a' }),
+    true,
+  );
 });
 
 test('a disjoint fetched window is never concatenated onto cached history', () => {
