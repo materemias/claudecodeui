@@ -211,9 +211,11 @@ function broadcastSessionStarsChanged(): void {
   }
 }
 
-function initializeOmpPinsWatcher(): void {
+async function initializeOmpPinsWatcher(): Promise<void> {
   const pinsPath = getOmpSessionPinsPath();
   try {
+    // Chokidar cannot follow a missing file through missing ancestor folders.
+    await fsPromises.mkdir(path.dirname(pinsPath), { recursive: true });
     // Watch the file even before it exists. Chokidar follows its creation and
     // atomic replacements; pins never enter the transcript synchronization path.
     const watcher = chokidar.watch(pinsPath, {
@@ -242,7 +244,7 @@ function initializeOmpPinsWatcher(): void {
  */
 export async function initializeSessionsWatcher(): Promise<void> {
   console.log('Setting up session watchers');
-  initializeOmpPinsWatcher();
+  await initializeOmpPinsWatcher();
 
   const initialSync = await sessionSynchronizerService.synchronizeSessions();
   console.log('Initial session synchronization complete', {

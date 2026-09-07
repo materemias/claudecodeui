@@ -72,8 +72,8 @@ async function replacePinsFile(temporaryPath: string, filePath: string): Promise
     }
   }
 
-  // Match OMP's Windows replacement fallback: keep the old file recoverable
-  // until the new one is installed, and restore it if installation fails.
+  // Keep the old file recoverable until the new one is installed, and restore
+  // it if installation fails.
   const backupPath = `${filePath}.${process.pid}.${randomUUID()}.bak`;
   await rename(filePath, backupPath);
   try {
@@ -85,11 +85,12 @@ async function replacePinsFile(temporaryPath: string, filePath: string): Promise
   await rm(backupPath, { force: true });
 }
 
-/** Used by the provider star service. Shares OMP's cross-process lock and preserves every unrelated pin. */
+/** Used by the provider star service. Serializes cooperating CloudCLI writers and retains unrelated pins. */
 export async function setOmpSessionPinned(nativeSessionId: string, desiredState?: boolean): Promise<boolean> {
   const filePath = getOmpSessionPinsPath();
   await mkdir(path.dirname(filePath), { recursive: true });
-  // This exact resolved suffix is the lock identity used by OMP withFileLock.
+  // Match the native lock helper's identity. OMP 18.1.13's /pin does not take
+  // this lock, so simultaneous TUI and CloudCLI changes remain last-writer-wins.
   const lockPath = `${filePath}.lock`;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const lock = acquireNativeLock(lockPath);
