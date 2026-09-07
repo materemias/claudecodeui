@@ -80,7 +80,7 @@ function Sidebar({
 
   const {
     isSidebarCollapsed,
-    expandedProjects,
+    isProjectExpanded,
     activeRename,
     showNewProject,
     initialSessionsLoaded,
@@ -193,7 +193,7 @@ function Sidebar({
     selectedSession,
     isLoading,
     loadingProgress,
-    expandedProjects,
+    isProjectExpanded,
     activeRename,
     initialSessionsLoaded,
     currentTime,
@@ -204,7 +204,6 @@ function Sidebar({
     loadingMoreProjects,
     activeSessions,
     attentionSessionIds,
-    forceExpanded: searchMode === 'running',
     isProjectStarred,
     onRenameDraftChange: updateRenameDraft,
     onToggleProject: toggleProject,
