@@ -61,7 +61,6 @@ type UseChatComposerStateArgs = {
   onSessionEstablished?: (sessionId: string, context: SessionEstablishedContext) => void;
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
-  scrollToBottom: () => void;
   addMessage: (msg: ChatMessage) => void;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
@@ -172,7 +171,6 @@ export function useChatComposerState({
   onSessionEstablished,
   onFileOpen,
   onShowSettings,
-  scrollToBottom,
   addMessage,
   setIsUserScrolledUp,
   setPendingPermissionRequests,
@@ -837,7 +835,6 @@ export function useChatComposerState({
       });
 
       setIsUserScrolledUp(false);
-      setTimeout(() => scrollToBottom(), 100);
 
       // One message shape for every provider. The backend resolves the
       // provider, project path, and provider-native resume id from the
@@ -890,7 +887,6 @@ export function useChatComposerState({
       provider,
       recordSentMessage,
       resetCommandMenuState,
-      scrollToBottom,
       selectedProject,
       sendMessage,
       sessionKey,
