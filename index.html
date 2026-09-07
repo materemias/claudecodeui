@@ -5,6 +5,33 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
+    <!-- Set the saved theme before the PWA shell paints. -->
+    <meta name="theme-color" content="#141414" />
+    <meta name="msapplication-TileColor" content="#141414" />
+    <script>
+      {
+        let savedTheme;
+        try {
+          const mirroredTheme = JSON.parse(localStorage.getItem('user-preferences') || 'null')?.theme;
+          savedTheme = mirroredTheme === 'system' || mirroredTheme === 'light' || mirroredTheme === 'dark'
+            ? mirroredTheme
+            : localStorage.getItem('theme');
+        } catch {
+          try {
+            savedTheme = localStorage.getItem('theme');
+          } catch {
+            // System preference remains available when storage is unavailable.
+          }
+        }
+        const isDark = savedTheme === 'dark'
+          || (savedTheme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        const themeColor = isDark ? '#141414' : '#f6f4ef';
+        document.documentElement.classList.toggle('dark', isDark);
+        document.querySelectorAll('meta[name="theme-color"], meta[name="msapplication-TileColor"]').forEach(meta => {
+          meta.setAttribute('content', themeColor);
+        });
+      }
+    </script>
     <title>CloudCLI UI</title>
 
     <!-- Fonts: Encode Sans (UI) + Merriweather (chat) -->
@@ -26,10 +53,6 @@
     <!-- iOS Safari Icons -->
     <link rel="apple-touch-icon" sizes="152x152" href="/icons/icon-152x152.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-192x192.png" />
-    
-    <!-- Theme Color -->
-    <meta name="theme-color" content="#ffffff" />
-    <meta name="msapplication-TileColor" content="#ffffff" />
     
     <!-- Prevent zoom on iOS -->
     <meta name="format-detection" content="telephone=no" />

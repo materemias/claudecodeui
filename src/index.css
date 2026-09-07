@@ -126,6 +126,10 @@
     transition: none;
   }
   
+  html {
+    @apply bg-background;
+  }
+
   body {
     @apply bg-background text-foreground;
 
