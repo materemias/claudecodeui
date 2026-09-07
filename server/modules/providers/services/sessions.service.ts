@@ -7,6 +7,7 @@ import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/i
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
 import { localAgentSessionsService } from '@/modules/providers/services/local-agent-sessions.service.js';
+import { getStarredSessionRows } from '@/modules/providers/services/session-star.service.js';
 import type {
   FetchHistoryOptions,
   FetchHistoryResult,
@@ -610,8 +611,8 @@ export const sessionsService = {
    * apply its starred filter in all of its views from a single fetch. One-shot
    * runs are excluded because they never appear in persistent lists.
    */
-  listStarredSessions(): StarredSessionListItem[] {
-    const starredSessions = sessionsDb.getStarredSessions();
+  async listStarredSessions(): Promise<StarredSessionListItem[]> {
+    const starredSessions = await getStarredSessionRows();
     const projectCache = new Map<string, ProjectRepositoryRow | null>();
 
     return starredSessions.map((session) => {

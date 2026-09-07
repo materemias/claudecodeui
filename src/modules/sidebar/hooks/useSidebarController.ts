@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, RecentWebSessionMap, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, StarredSessionListItem, TerminalRunningSessionMap } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, RecentWebSessionMap, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, ServerEvent, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, StarredSessionListItem, TerminalRunningSessionMap } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -85,6 +85,7 @@ type UseSidebarControllerArgs = {
   setCurrentProject: (project: Project) => void;
   setSidebarVisible: (visible: boolean) => void;
   sidebarVisible: boolean;
+  subscribe: (listener: (event: ServerEvent) => void) => () => void;
 };
 
 /** Used by the sidebar controller and its pagination regression test to build the complete Running view. */
@@ -254,6 +255,7 @@ export function useSidebarController({
   setCurrentProject,
   setSidebarVisible,
   sidebarVisible,
+  subscribe,
 }: UseSidebarControllerArgs) {
   const paletteOps = usePaletteOps();
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
@@ -321,6 +323,19 @@ export function useSidebarController({
   const starredSessionsFetchSequenceRef = useRef(0);
   // Lets a toggle that saw a stale fetch reconcile against the newest accepted list.
   const latestStarredRefreshRef = useRef<StarredSessionsRefreshState | null>(null);
+  // The fetched stars with in-flight toggles applied, so a row and every filter
+  // agree on one answer for "is this session starred".
+  const starredSessionIds = useMemo(() => {
+    const sessionIds = new Set(starredSessions.map((session) => session.sessionId));
+    for (const [sessionId, optimisticValue] of optimisticStarBySessionId.entries()) {
+      if (optimisticValue) {
+        sessionIds.add(sessionId);
+      } else {
+        sessionIds.delete(sessionId);
+      }
+    }
+    return sessionIds;
+  }, [optimisticStarBySessionId, starredSessions]);
 
   const migrationStartedRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
@@ -631,6 +646,18 @@ export function useSidebarController({
     void fetchStarredSessions();
   }, [fetchStarredSessions]);
 
+  useEffect(() => subscribe((event) => {
+    // The pin notification can precede the transcript index, so an OMP upsert
+    // must retry membership after the native session becomes queryable.
+    if (
+      event.kind === 'session_stars_changed'
+      || event.kind === 'websocket_reconnected'
+      || (event.kind === 'session_upserted' && event.provider === 'omp')
+    ) {
+      void fetchStarredSessions();
+    }
+  }), [fetchStarredSessions, subscribe]);
+
   useEffect(() => {
     if (searchMode !== 'conversations' || debouncedSearchQuery.length >= 2) {
       return;
@@ -688,6 +715,16 @@ export function useSidebarController({
       clearTimeout(timeout);
     };
   }, [searchFilter]);
+
+  // Search is capped on the server. Refiltering its old results cannot reveal
+  // newly pinned matches. Include committed membership too: an optimistic
+  // click can start a search before its write reaches the server.
+  const starredSearchMembership = useMemo(() => isStarredSessionsOnly
+    ? JSON.stringify([
+      [...starredSessionIds].sort(),
+      starredSessions.map((session) => session.sessionId).sort(),
+    ])
+    : '', [isStarredSessionsOnly, starredSessionIds, starredSessions]);
 
   // Debounced conversation search with SSE streaming
   useEffect(() => {
@@ -806,7 +843,7 @@ export function useSidebarController({
         eventSourceRef.current = null;
       }
     };
-  }, [debouncedSearchQuery, isStarredSessionsOnly, searchMode]);
+  }, [debouncedSearchQuery, isStarredSessionsOnly, searchMode, starredSearchMembership]);
 
   // All sidebar state keys (expanded, starred, loading, etc.) use the DB
   // `projectId` as their identifier after the migration.
@@ -924,19 +961,6 @@ export function useSidebarController({
     [resolveProjectStarState],
   );
 
-  // The fetched stars with in-flight toggles applied, so a row and every filter
-  // agree on one answer for "is this session starred".
-  const starredSessionIds = useMemo(() => {
-    const sessionIds = new Set(starredSessions.map((session) => session.sessionId));
-    for (const [sessionId, optimisticValue] of optimisticStarBySessionId.entries()) {
-      if (optimisticValue) {
-        sessionIds.add(sessionId);
-      } else {
-        sessionIds.delete(sessionId);
-      }
-    }
-    return sessionIds;
-  }, [optimisticStarBySessionId, starredSessions]);
 
   const isSessionStarred = useCallback(
     (sessionId: string) => starredSessionIds.has(sessionId),

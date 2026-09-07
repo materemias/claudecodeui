@@ -38,7 +38,7 @@ export type SessionRow = {
   forked_from_session_id: string | null;
   /** One for non-interactive provider CLI sessions, zero for interactive sessions. */
   is_one_shot: number;
-  /** 1 while the user has pinned this session to the starred sidebar filter. */
+  /** SQLite star state for non-OMP providers; OMP's native pin file is authoritative. */
   isStarred: number;
   isArchived: number;
   created_at: string;
@@ -780,21 +780,37 @@ export const sessionsDb = {
   },
 
   /**
-   * Starred rows deliberately include archived sessions: the sidebar's starred
-   * filter applies to every view, including the archive one, so the caller
-   * decides which of them belong in the collection it is rendering.
+   * Provider services supply native OMP pins so stale OMP SQLite flags cannot
+   * affect membership. Separate indexed lookups avoid scanning the session table
+   * for a small pin set. Archived rows remain available to the sidebar archive.
    */
-  getStarredSessions(): SessionRow[] {
+  getStarredSessions(ompNativePins: ReadonlySet<string>): SessionRow[] {
     const db = getConnection();
     const rows = db
       .prepare(
-        `SELECT ${SESSION_ROW_COLUMNS}
-         FROM sessions
-         WHERE isStarred = 1
-           AND is_one_shot = 0
+        `WITH native_pins AS (
+           SELECT value FROM json_each(?)
+         ), starred AS (
+           SELECT ${SESSION_ROW_COLUMNS}
+           FROM sessions
+           WHERE isStarred = 1 AND provider != 'omp'
+           UNION ALL
+           SELECT ${SESSION_ROW_COLUMNS}
+           FROM sessions
+           WHERE provider = 'omp'
+             AND provider_session_id IN (SELECT value FROM native_pins)
+           UNION ALL
+           SELECT ${SESSION_ROW_COLUMNS}
+           FROM native_pins CROSS JOIN sessions
+           WHERE sessions.provider = 'omp'
+             AND sessions.provider_session_id IS NULL
+             AND sessions.session_id = native_pins.value
+         )
+         SELECT * FROM starred
+         WHERE is_one_shot = 0
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
       )
-      .all() as SessionRow[];
+      .all(JSON.stringify([...ompNativePins])) as SessionRow[];
 
     return normalizeSessionRows(rows);
   },

@@ -791,7 +791,7 @@ router.get(
 router.get(
   '/sessions/starred',
   asyncHandler(async (_req: Request, res: Response) => {
-    const sessions = sessionsService.listStarredSessions();
+    const sessions = await sessionsService.listStarredSessions();
     res.json(createApiSuccessResponse({ sessions }));
   }),
 );
@@ -861,7 +861,7 @@ router.post(
       });
     }
 
-    const result = toggleSessionStar(sessionId, desiredState);
+    const result = await toggleSessionStar(sessionId, desiredState);
     res.json(createApiSuccessResponse(result));
   }),
 );

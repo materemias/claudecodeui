@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
 import { useVersionCheck } from '@/shared/hooks/useVersionCheck';
 import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPreferencesContext';
+import { useWebSocket } from '@/shared/context/WebSocketContext';
 import { useSidebarController } from '@/modules/sidebar/hooks/useSidebarController';
 import { useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import { usePaletteOps } from '@/modules/command-palette';
@@ -88,6 +89,7 @@ function Sidebar({
   );
   const preferences = useUiPreferences();
   const setPreference = useSetUiPreference();
+  const { subscribe } = useWebSocket();
   const { sidebarVisible } = preferences;
   const { setCurrentProject, mcpServerStatus } = useTaskMaster() as TaskMasterSidebarContext;
   const { tasksEnabled } = useTasksSettings();
@@ -188,6 +190,7 @@ function Sidebar({
     setCurrentProject,
     setSidebarVisible: (visible) => setPreference('sidebarVisible', visible),
     sidebarVisible,
+    subscribe,
   });
 
   useEffect(() => {

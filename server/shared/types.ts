@@ -309,6 +309,7 @@ export type GatewayEventKind =
   | 'chat_subscribed'
   | 'pong'
   | 'session_upserted'
+  | 'session_stars_changed'
   | 'loading_progress'
   | 'protocol_error';
 
