@@ -59,7 +59,12 @@ export const authenticatedFetch = (
   const authorization = headers.Authorization ?? headers.authorization;
   const sentToken = authorization === undefined ? token : bearerCredential(authorization);
 
-  return fetch(url, { ...options, headers }).then((response) => {
+  return fetch(url, {
+    ...options,
+    // Auth responses carry session headers, so callers cannot opt back into caching.
+    cache: 'no-store',
+    headers,
+  }).then((response) => {
     const refreshedToken = response.headers.get('X-Refreshed-Token');
     if (refreshedToken) {
       storeAuthToken(refreshedToken);
