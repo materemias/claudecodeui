@@ -12,6 +12,73 @@ import { findSearchTargetIndex, resolveSearchWindowSize } from '@/modules/chat/u
 import { readSelectedProvider } from '@/shared/selectedProvider';
 import type { SearchTarget } from '@/modules/chat/utils/searchTargetLocator';
 
+type UserTurnDirection = 'previous' | 'next';
+
+const USER_TURN_ALIGNMENT_TOLERANCE = 8;
+
+function findAdjacentUserTurn(
+  container: HTMLDivElement,
+  direction: UserTurnDirection,
+  currentTarget: HTMLElement | null,
+): HTMLElement | null {
+  const containerBounds = container.getBoundingClientRect();
+  const userTurns = Array.from(container.querySelectorAll<HTMLElement>('[data-user-turn]'));
+
+  if (currentTarget?.isConnected) {
+    const currentIndex = userTurns.indexOf(currentTarget);
+    const currentBounds = currentTarget.getBoundingClientRect();
+    const targetStillVisible = (
+      currentBounds.bottom >= containerBounds.top
+      && currentBounds.top <= containerBounds.bottom
+    );
+    if (currentIndex >= 0 && targetStillVisible) {
+      const targetIndex = currentIndex + (direction === 'next' ? 1 : -1);
+      return userTurns[targetIndex] ?? null;
+    }
+  }
+
+  const containerCenter = containerBounds.top + containerBounds.height / 2;
+  if (direction === 'next') {
+    for (const userTurn of userTurns) {
+      const bounds = userTurn.getBoundingClientRect();
+      if (bounds.top + bounds.height / 2 > containerCenter + USER_TURN_ALIGNMENT_TOLERANCE) {
+        return userTurn;
+      }
+    }
+    return null;
+  }
+
+  for (let index = userTurns.length - 1; index >= 0; index -= 1) {
+    const userTurn = userTurns[index];
+    const bounds = userTurn.getBoundingClientRect();
+    if (bounds.top + bounds.height / 2 < containerCenter - USER_TURN_ALIGNMENT_TOLERANCE) {
+      return userTurn;
+    }
+  }
+  return null;
+}
+
+function findPreviousUserTurnIndex(messages: readonly ChatMessage[], beforeIndex: number): number {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    if (messages[index].type === 'user') {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function waitForChatLayout(): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, 100);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  });
+}
+
 const INITIAL_VISIBLE_MESSAGES = 100;
 
 /** Messages kept below a search hit so it lands mid-viewport rather than at the edge. */
@@ -208,6 +275,7 @@ export function useChatSessionState({
   const [isLoadingAllMessages, setIsLoadingAllMessages] = useState(false);
   const [loadAllJustFinished, setLoadAllJustFinished] = useState(false);
   const [showLoadAllOverlay, setShowLoadAllOverlay] = useState(false);
+  const [navigatingUserTurn, setNavigatingUserTurn] = useState<UserTurnDirection | null>(null);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const wasNearTopRef = useRef(false);
@@ -248,6 +316,14 @@ export function useChatSessionState({
     isUserScrolledUpRef.current = false;
   }
   const transcriptGeneration = transcriptGenerationRef.current;
+  const navigatingUserTurnRef = useRef<UserTurnDirection | null>(null);
+  const visibleMessageCountRef = useRef(visibleMessageCount);
+  const chatMessagesRef = useRef<ChatMessage[]>([]);
+  const scrollNavigationGenerationRef = useRef(0);
+  const sessionRequestGenerationRef = useRef(0);
+  const navigationProjectRef = useRef<string | null>(null);
+  const navigationSessionRef = useRef<string | null>(null);
+  const lastNavigatedUserTurnRef = useRef<HTMLElement | null>(null);
   /**
    * Tracks the last processed value from `useProjectsState.newSessionTrigger`.
    *
@@ -283,6 +359,17 @@ export function useChatSessionState({
      * - No dependence on route/tab/session-object identity changes.
      * - No coupling to unrelated external update signals.
      */
+    scrollNavigationGenerationRef.current += 1;
+    sessionRequestGenerationRef.current += 1;
+    navigatingUserTurnRef.current = null;
+    setNavigatingUserTurn(null);
+    lastNavigatedUserTurnRef.current = null;
+    isLoadingMoreRef.current = false;
+    setIsLoadingMoreMessages(false);
+    if (searchScrollTimerRef.current) {
+      clearTimeout(searchScrollTimerRef.current);
+      searchScrollTimerRef.current = null;
+    }
     setCurrentSessionId(null);
     setPendingUserMessage(null);
     messagesOffsetRef.current = 0;
@@ -319,6 +406,16 @@ export function useChatSessionState({
   /* ---------------------------------------------------------------- */
 
   const activeSessionId = selectedSession?.id || currentSessionId || null;
+
+  if (
+    navigationSessionRef.current !== activeSessionId
+    || navigationProjectRef.current !== (selectedProject?.projectId ?? null)
+  ) {
+    navigationSessionRef.current = activeSessionId;
+    navigationProjectRef.current = selectedProject?.projectId ?? null;
+    scrollNavigationGenerationRef.current += 1;
+    sessionRequestGenerationRef.current += 1;
+  }
 
   // The activity indicator always reflects the latest status of the session
   // being viewed — never stale local UI state from the last time it was
@@ -432,6 +529,9 @@ export function useChatSessionState({
     return all;
   }, [storeMessages, pendingUserMessage]);
 
+  visibleMessageCountRef.current = visibleMessageCount;
+  chatMessagesRef.current = chatMessages;
+
   /* ---------------------------------------------------------------- */
   /*  addMessage                                                       */
   /* ---------------------------------------------------------------- */
@@ -461,6 +561,19 @@ export function useChatSessionState({
   }, []);
 
   const scrollToBottomAndReset = useCallback(() => {
+    scrollNavigationGenerationRef.current += 1;
+    navigatingUserTurnRef.current = null;
+    setNavigatingUserTurn(null);
+    if (searchScrollTimerRef.current) {
+      clearTimeout(searchScrollTimerRef.current);
+      searchScrollTimerRef.current = null;
+    }
+    searchScrollActiveRef.current = false;
+    setSearchTarget(null);
+    pendingScrollRestoreRef.current = null;
+    lastNavigatedUserTurnRef.current = null;
+    isUserScrolledUpRef.current = false;
+    setIsUserScrolledUp(false);
     scrollToBottom();
     if (allMessagesLoaded) {
       setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
@@ -482,15 +595,17 @@ export function useChatSessionState({
   }, [setIsUserScrolledUp, transcriptGeneration]);
 
   const loadOlderMessages = useCallback(
-    async (container: HTMLDivElement) => {
+    async (container: HTMLDivElement, canApply?: () => boolean) => {
       if (!isActive) return false;
       if (!container || isLoadingMoreRef.current || isLoadingMoreMessages) return false;
       if (allMessagesLoadedRef.current) return false;
       if (!hasMoreMessages || !selectedSession || !selectedProject) return false;
+      const requestSessionId = selectedSession.id;
+      const requestSessionGeneration = sessionRequestGenerationRef.current;
+      const requestScrollGeneration = scrollNavigationGenerationRef.current;
 
       const requestGeneration = transcriptGeneration;
       const requestIdentity = transcriptIdentity;
-      const requestSessionId = selectedSession.id;
       if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return false;
 
       isLoadingMoreRef.current = true;
@@ -504,10 +619,21 @@ export function useChatSessionState({
             ownsTranscript(requestGeneration, requestIdentity, requestSessionId)
             && isActiveRef.current
             && activeSessionIdRef.current === requestSessionId
+            && sessionRequestGenerationRef.current === requestSessionGeneration
+            && scrollNavigationGenerationRef.current === requestScrollGeneration
+            && (!canApply || canApply())
           ),
         });
-        if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return false;
-
+        if (
+          !ownsTranscript(requestGeneration, requestIdentity, requestSessionId)
+          || !isActiveRef.current
+          || activeSessionIdRef.current !== requestSessionId
+          || sessionRequestGenerationRef.current !== requestSessionGeneration
+          || scrollNavigationGenerationRef.current !== requestScrollGeneration
+          || (canApply && !canApply())
+        ) {
+          return false;
+        }
         const { slot, prependedCount } = result;
         setHasMoreMessages(slot.hasMore);
         setTotalMessages(slot.total);
@@ -542,7 +668,12 @@ export function useChatSessionState({
         }
         return true;
       } finally {
-        if (ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) {
+        if (
+          ownsTranscript(requestGeneration, requestIdentity, requestSessionId)
+          && activeSessionIdRef.current === requestSessionId
+          && sessionRequestGenerationRef.current === requestSessionGeneration
+          && scrollNavigationGenerationRef.current === requestScrollGeneration
+        ) {
           isLoadingMoreRef.current = false;
           setIsLoadingMoreMessages(false);
         }
@@ -560,6 +691,74 @@ export function useChatSessionState({
       transcriptIdentity,
     ],
   );
+
+  const navigateUserTurn = useCallback(async (direction: UserTurnDirection) => {
+    const container = scrollContainerRef.current;
+    const requestSessionId = activeSessionIdRef.current;
+    if (!container || navigatingUserTurnRef.current) return;
+
+    if (searchScrollTimerRef.current) {
+      clearTimeout(searchScrollTimerRef.current);
+      searchScrollTimerRef.current = null;
+    }
+    searchScrollActiveRef.current = false;
+    setSearchTarget(null);
+
+    const requestGeneration = scrollNavigationGenerationRef.current + 1;
+    scrollNavigationGenerationRef.current = requestGeneration;
+    const isCurrentNavigation = () => (
+      isActiveRef.current
+      && activeSessionIdRef.current === requestSessionId
+      && scrollNavigationGenerationRef.current === requestGeneration
+      && scrollContainerRef.current === container
+    );
+
+    navigatingUserTurnRef.current = direction;
+    setNavigatingUserTurn(direction);
+    isUserScrolledUpRef.current = true;
+    setIsUserScrolledUp(true);
+
+    try {
+      let target = findAdjacentUserTurn(container, direction, lastNavigatedUserTurnRef.current);
+
+      while (!target && direction === 'previous' && isCurrentNavigation()) {
+        const messages = chatMessagesRef.current;
+        const visibleStart = Math.max(0, messages.length - visibleMessageCountRef.current);
+        const olderTurnIndex = findPreviousUserTurnIndex(messages, visibleStart);
+
+        if (olderTurnIndex >= 0) {
+          pendingScrollRestoreRef.current = captureScrollRestoreState(container);
+          const requiredVisibleCount = messages.length - olderTurnIndex;
+          setVisibleMessageCount((current) => Math.max(current, requiredVisibleCount));
+        } else {
+          const loaded = await loadOlderMessages(container, isCurrentNavigation);
+          if (!loaded) break;
+        }
+
+        await waitForChatLayout();
+        if (!isCurrentNavigation()) break;
+        target = findAdjacentUserTurn(container, direction, lastNavigatedUserTurnRef.current);
+      }
+
+      if (!target || !target.isConnected || !isCurrentNavigation()) return;
+
+      pendingScrollRestoreRef.current = null;
+      target.scrollIntoView({ behavior: 'auto', block: 'center' });
+      await waitForChatLayout();
+      if (target.isConnected && isCurrentNavigation()) {
+        target.scrollIntoView({ behavior: 'auto', block: 'center' });
+        lastNavigatedUserTurnRef.current = target;
+      }
+    } finally {
+      if (scrollNavigationGenerationRef.current === requestGeneration) {
+        navigatingUserTurnRef.current = null;
+        setNavigatingUserTurn(null);
+        const userScrolledUp = !isNearBottom();
+        isUserScrolledUpRef.current = userScrolledUp;
+        setIsUserScrolledUp(userScrolledUp);
+      }
+    }
+  }, [isNearBottom, loadOlderMessages]);
 
   const handleScroll = useCallback(async () => {
     if (!isActive || transcriptGeneration !== transcriptGenerationRef.current) return;
@@ -638,7 +837,13 @@ export function useChatSessionState({
         ? scrollPositionRef.current.top
         : container.scrollHeight;
     }
-  }, [chatMessages.length, isActive, transcriptGeneration]);
+  }, [
+    chatMessages.length,
+    isActive,
+    isUserScrolledUp,
+    transcriptGeneration,
+    visibleMessageCount,
+  ]);
 
   // Reset scroll/pagination state on session change
   useEffect(() => {
@@ -658,6 +863,12 @@ export function useChatSessionState({
     }
     searchScrollActiveRef.current = false;
     setSearchTarget(null);
+    scrollNavigationGenerationRef.current += 1;
+    navigatingUserTurnRef.current = null;
+    setNavigatingUserTurn(null);
+    lastNavigatedUserTurnRef.current = null;
+    isLoadingMoreRef.current = false;
+    setIsLoadingMoreMessages(false);
 
     setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
     setIsLoadingMoreMessages(false);
@@ -865,13 +1076,27 @@ export function useChatSessionState({
     if (!isActive || !searchTarget || chatMessages.length === 0 || isLoadingSessionMessages) return;
 
     const target = searchTarget;
-    const requestGeneration = transcriptGeneration;
+    const requestTranscriptGeneration = transcriptGeneration;
     const requestIdentity = transcriptIdentity;
-    const requestSessionId = selectedSession?.id;
+    const requestSessionId = activeSessionIdRef.current;
     setSearchTarget(null);
+    const requestScrollGeneration = scrollNavigationGenerationRef.current + 1;
+    scrollNavigationGenerationRef.current = requestScrollGeneration;
+    navigatingUserTurnRef.current = null;
+    setNavigatingUserTurn(null);
+    lastNavigatedUserTurnRef.current = null;
+
+    const isCurrentSearch = () => (
+      isActiveRef.current
+      && activeSessionIdRef.current === requestSessionId
+      && scrollNavigationGenerationRef.current === requestScrollGeneration
+    );
 
     const scrollToTarget = async () => {
-      if (!requestSessionId || !ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) {
+      if (
+        !requestSessionId
+        || !ownsTranscript(requestTranscriptGeneration, requestIdentity, requestSessionId)
+      ) {
         return;
       }
       if (!allMessagesLoadedRef.current && selectedProject) {
@@ -880,9 +1105,15 @@ export function useChatSessionState({
           const slot = await sessionStore.fetchFromServer(requestSessionId, {
             limit: null,
             offset: 0,
-            canRequest: () => ownsTranscript(requestGeneration, requestIdentity, requestSessionId),
+            canRequest: () => (
+              ownsTranscript(requestTranscriptGeneration, requestIdentity, requestSessionId)
+              && isCurrentSearch()
+            ),
           });
-          if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
+          if (
+            !ownsTranscript(requestTranscriptGeneration, requestIdentity, requestSessionId)
+            || !isCurrentSearch()
+          ) return;
           if (slot) {
             // Fetch the whole transcript so an old hit can be found, but do
             // not render all of it — the window below is widened to exactly
@@ -900,7 +1131,10 @@ export function useChatSessionState({
           // Fall through and scroll in current messages
         }
       }
-      if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
+      if (
+        !ownsTranscript(requestTranscriptGeneration, requestIdentity, requestSessionId)
+        || !isCurrentSearch()
+      ) return;
       // Resolve the target against the loaded transcript rather than the DOM.
       // The store is the freshest source here: the `fetchFromServer` above has
       // landed but `chatMessages` is from the render that scheduled this effect.
@@ -927,8 +1161,15 @@ export function useChatSessionState({
       const targetTimestamp = messagesForSearch[targetIndex].timestamp;
 
       const scrollToRenderedTarget = (retriesLeft: number) => {
-        if (!ownsTranscript(requestGeneration, requestIdentity, requestSessionId)) return;
+        if (
+          !ownsTranscript(requestTranscriptGeneration, requestIdentity, requestSessionId)
+        ) return;
         const container = scrollContainerRef.current;
+        if (!isCurrentSearch()) {
+          searchScrollTimerRef.current = null;
+          searchScrollActiveRef.current = false;
+          return;
+        }
         if (!container) return;
 
         // The target is inside the window by construction, so this only waits
@@ -1177,5 +1418,7 @@ export function useChatSessionState({
     scrollToBottomAndReset,
     handleScroll,
     requestLatestMessages,
+    navigateUserTurn,
+    navigatingUserTurn,
   };
 }

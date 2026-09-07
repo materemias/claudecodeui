@@ -110,7 +110,9 @@
     "clickToChangeMode": "İzin modunu değiştirmek için tıkla (veya girdide Tab tuşuna bas)",
     "showAllCommands": "Tüm komutları göster",
     "clearInput": "Girdiyi temizle",
-    "scrollToBottom": "En alta git"
+    "scrollToBottom": "En alta git",
+    "previousUserTurn": "Önceki kullanıcı mesajı",
+    "nextUserTurn": "Sonraki kullanıcı mesajı"
   },
   "providerSelection": {
     "title": "AI Asistanını Seç",
