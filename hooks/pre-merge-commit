@@ -1,0 +1,43 @@
+#!/bin/sh
+# Companion to pre-commit: git invokes THIS hook for a merge that resolves cleanly, and
+# pre-commit only for the commit that finishes a conflicted one. Without this, a session
+# could merge a leaf into my/daily by hand - the divergence the rebuild exists to prevent,
+# since my/daily is reconstructed from the ledger, never advanced incrementally.
+
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+
+gitdir=$(cd "$(git rev-parse --git-dir)" && pwd -P)
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+if [ "$branch" != "my/daily" ] && [ "$gitdir" = "$common" ]; then
+    cat >&2 <<EOF
+
+stack: refusing to merge on $branch from the main checkout.
+
+Development branches merge from their own linked worktrees. Keep the main checkout on
+my/daily, and use ./stack wt $branch to restore the branch worktree.
+
+EOF
+    exit 1
+fi
+
+[ "$branch" = "my/daily" ] || exit 0
+[ -n "$STACK_DAILY" ] && exit 0
+
+cat >&2 <<'EOF'
+
+stack: refusing a hand merge into my/daily.
+
+my/daily is reconstructed, not advanced: `./stack daily` recreates it from upstream/main and
+merges the ledger's leaves in recorded order, which is what keeps the merge order and the
+rerere resolutions meaningful. A merge made here survives until the next rebuild, then vanishes.
+
+    ./stack daily              # the only thing that writes my/daily
+    ./stack ls                 # which leaves it merges, in which order
+
+Merging a branch that should be in the rebuild? Give it a ledger row (./stack new, or edit
+stack.tsv) and rebuild. Finishing the conflict a stopped rebuild left? Resolve, `git add -u`,
+then `./stack daily --continue` - a plain `git merge --continue` is refused too, because
+nothing in the merge state distinguishes it from a hand merge of the same leaf.
+
+EOF
+exit 1

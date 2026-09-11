@@ -1,0 +1,49 @@
+# The fork's branch ledger. Untracked, local only. Read by ./stack.
+#
+# Columns are TAB-separated: branch, base, intent, note.
+#   branch  category prefix decides the intent category: feat/ fix/ ui/ local/
+#   base    what it was cut from; a branch named here is a parent, not a leaf
+#   intent  pr    = meant for an upstream PR (open one with ./stack pr <branch>)
+#           local = fork-only, never PR'd; pushed to origin as a backup only
+#   note    one line, for ./stack ls
+#
+# File order is merge order for ./stack daily. It is load-bearing: feat/omp-provider
+# must precede ui/interrupted-turn-notice (both add a MessageKind member and a
+# MessageComponent branch), and the recorded rerere resolutions assume this order.
+#
+# PR numbers are deliberately absent - ./stack ls reads them live from GitHub, so they
+# cannot go stale. Add a row with ./stack new, drop one by hand when its PR lands.
+#
+#branch	base	intent	note
+feat/shared-tool-approval-registry	upstream/main	pr	provider-agnostic tool-approval registry
+feat/omp-provider	feat/shared-tool-approval-registry	pr	Oh My Pi as a first-class provider
+fix/chat-stream-buffers	feat/omp-provider	pr	per-session buffers for both streamed surfaces
+fix/chat-stream-sealing	fix/chat-stream-buffers	pr	close a streamed row at each message boundary
+ui/interrupted-turn-notice	fix/chat-stream-buffers	pr	say when a turn was cut off, in 11 locales
+fix/ws-channel-recovery	upstream/main	pr	recover broken chat channels and missing subscription acknowledgements
+fix/ws-resume-and-reconnect	fix/ws-channel-recovery	pr	preserve unpublished selection-refresh callback atop the clean recovery replacement
+fix/chat-row-containment	upstream/main	pr	scrolled-away rows stop becoming tall empty boxes
+local/tool-content-folding	upstream/main	local	fold large tool content - taste, never a PR
+feat/back-opens-session-list	upstream/main	pr	mobile back opens the session list
+feat/running-sessions-linux	feat/omp-provider	pr	detect agent sessions running outside the UI
+feat/recent-web-sessions	feat/running-sessions-linux	pr	keep completed Web UI runs discoverable for four hours
+local/mobile-sidebar	upstream/main	local	compact mobile sidebar controls
+fix/running-view-collapse	upstream/main	pr	Running now can collapse its project groups
+fix/pwa-cold-start-session	upstream/main	pr	keep the session when auth cannot be verified (PWA cold start)
+fix/jwt-secret-rotation	upstream/main	pr	stop silently rotating the JWT secret when an app_config read fails
+fix/chat-stale-scroll-and-page-writes	upstream/main	pr	a reading gesture wins; a page in flight cannot write into the next session
+fix/stale-refreshed-token	upstream/main	pr	stale auth failures cannot discard a newer refreshed token
+local/running-default-tab	upstream/main	local	sidebar opens on Running, without its redundant header bar
+local/selected-session-contrast	upstream/main	local	the selected session is identifiable in dark mode
+fix/omp-live-model-sync	feat/omp-provider	pr	follow omp live model: parse config_option_update, sticky dirty-gated pushes
+ui/model-picker-search	upstream/main	pr	search box + provider group headings in the composer model picker
+local/more-chat-history	upstream/main	local	load 80 older chat rows per top-scroll fetch instead of 20
+feat/chat-turn-navigation	upstream/main	pr	add mobile controls to jump between user turns
+local/ui/hide-print-sessions	fix/omp-live-model-sync	local	hide one-shot and background CLI sessions from the sidebar
+fix/dark-pwa-status-bar	upstream/main	pr	match the Android PWA shell to dark mode
+fix/running-agent-list	feat/recent-web-sessions	pr	hydrate paginated running sessions and refresh all sources
+fix/chat-latex-escaping	upstream/main	pr	escaping no longer shreds LaTeX or currency
+feat/copy-resume-command	upstream/main	pr	copy terminal resume command from the session title
+feat/session-stars	feat/omp-provider	pr	star sessions and filter starred views; share OMP native pins
+fix/status-note-page-overlap	upstream/main	pr	same-timestamp status notes stop faking a page overlap that stalls older history
+ui/compact-tool-display	upstream/main	pr	opt-in per-turn compact tool summaries with visible file writes and latest checklist
