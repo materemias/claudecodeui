@@ -6,7 +6,6 @@ import { Codex } from '@openai/codex-sdk';
 import type { Thread, ThreadOptions } from '@openai/codex-sdk';
 
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
-import type { ProviderRuntimeContext } from '@/shared/index.js';
 
 for (const resumed of [false, true]) {
   for (const permissionMode of [undefined, 'default', 'unknown', 'acceptEdits', 'bypassPermissions']) {
@@ -33,9 +32,15 @@ for (const resumed of [false, true]) {
         capturedOptions = options;
         return thread;
       });
-      const context: ProviderRuntimeContext = {
+      const context = {
         resolveProviderSessionId: () => resumed ? 'native-thread' : null,
         resolveResumeModel: async () => 'test-model',
+        readPendingSessionSelection: () => ({
+          sessionExists: resumed,
+          model: { pending: false as const, value: null },
+          effort: { pending: false as const, value: null },
+        }),
+        recordSessionConfigReport: async () => undefined,
         getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'test-model' }),
         normalizeMessage: () => [],
         isProviderInstalled: async () => true,
@@ -73,9 +78,15 @@ for (const command of ['', '  \n\t']) {
     } as unknown as Thread;
 
     t.mock.method(Codex.prototype, 'startThread', () => thread);
-    const context: ProviderRuntimeContext = {
+    const context = {
       resolveProviderSessionId: () => null,
       resolveResumeModel: async () => 'test-model',
+      readPendingSessionSelection: () => ({
+        sessionExists: false,
+        model: { pending: false as const, value: null },
+        effort: { pending: false as const, value: null },
+      }),
+      recordSessionConfigReport: async () => undefined,
       getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'test-model' }),
       normalizeMessage: () => [],
       isProviderInstalled: async () => true,
